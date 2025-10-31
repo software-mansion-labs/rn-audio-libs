@@ -15,10 +15,10 @@ OUTPUT_DIR="$(pwd)/output"
 mkdir -p "${BUILD_DIR}"
 mkdir -p "${OUTPUT_DIR}"
 
-AVUTIL_VERSION="60.6.100"
-AVCODEC_VERSION="62.8.100"
-AVFORMAT_VERSION="62.1.103"
-SWRRESAMPLE_VERSION="6.0.100"
+AVUTIL_VERSION="60.8.100"
+AVCODEC_VERSION="62.11.100"
+AVFORMAT_VERSION="62.3.100"
+SWRRESAMPLE_VERSION="6.1.100"
 
 COMMON_CONFIG="
 --disable-programs
@@ -42,18 +42,15 @@ COMMON_CONFIG="
 --disable-audiotoolbox
 --disable-videotoolbox
 --disable-hwaccels
---enable-protocol=https,tls,tcp,http
---enable-demuxer=hls
---enable-demuxer=mov
---enable-demuxer=mp3
---enable-parser=aac
---enable-decoder=aac
---enable-decoder=mp3
---enable-decoder=flac
---enable-protocol=udp
---enable-protocol=file
---enable-pic
 --disable-x86asm
+--disable-inline-asm
+--enable-protocol=https,tls,tcp,http,udp,file
+--enable-demuxer=hls,mov,mp3
+--enable-parser=aac
+--enable-decoder=aac,mp3,flac,alac
+--enable-encoder=aac,mp3,flac,pcm_s16le
+--enable-muxer=wav,mp4,flac,caf
+--enable-pic
 "
 
 build_arch() {
