@@ -2,6 +2,9 @@
   "opus": {
     "version": "1.6.1"
   },
+  "opusfile": {
+    "version": "0.12"
+  },
   "ogg": {
     "version": "1.3.5"
   },

@@ -220,6 +220,26 @@ copy_to_output() {
     cp -R "$vorbis_prefix/include/vorbis" "$dest/include/"
 }
 
+create_fat_binary() {
+    local platform="$1"
+    shift
+    local -a archs=("$@")
+
+    local dest="$OUTPUT_DIR/$platform/fat"
+    mkdir -p "$dest/lib"
+
+    for lib in libogg.a libvorbis.a libvorbisfile.a libvorbisenc.a; do
+        local lib_paths=()
+        for arch in "${archs[@]}"; do
+            lib_paths+=("$OUTPUT_DIR/$platform/$arch/lib/$lib")
+        done
+        lipo -create "${lib_paths[@]}" -output "$dest/lib/$lib"
+    done
+
+    # Copy headers from first arch
+    cp -R "$OUTPUT_DIR/$platform/${archs[0]}/include" "$dest/"
+}
+
 # ============================================================================
 # BUILD FUNCTIONS
 # ============================================================================
@@ -307,6 +327,51 @@ build_ios() {
         --disable-oggtest
 
     copy_to_output "ios" "${sdk}-${arch}" "$ogg_prefix" "$vorbis_prefix"
+}
+
+build_catalyst() {
+    local arch="$1"
+    local host="$2"
+
+    echo "==> Mac Catalyst: $arch"
+
+    reset_env
+
+    local sdkroot
+    sdkroot="$(xcrun --sdk macosx --show-sdk-path)"
+
+    export CC="$(xcrun --sdk macosx --find clang)"
+    export AR="$(xcrun --sdk macosx --find ar)"
+    export RANLIB="$(xcrun --sdk macosx --find ranlib)"
+
+    local target="${arch}-apple-ios${IOS_MIN_VERSION}-macabi"
+    export CFLAGS="-O3 -fPIC -target $target -isysroot $sdkroot"
+    export LDFLAGS="-target $target -isysroot $sdkroot"
+
+    local ogg_build_dir="$BUILD_DIR/catalyst/$arch/ogg"
+    local ogg_prefix="$ogg_build_dir/install"
+
+    local vorbis_build_dir="$BUILD_DIR/catalyst/$arch/vorbis"
+    local vorbis_prefix="$vorbis_build_dir/install"
+
+    # Build ogg first
+    echo "Building libogg for Mac Catalyst $arch..."
+    run_configure_make_install "$OGG_DIR" "$ogg_build_dir" "$ogg_prefix" \
+        --build="$BUILD_MACHINE" --host="$host" cross_compiling=yes
+
+    # Build vorbis with ogg dependency
+    echo "Building libvorbis for Mac Catalyst $arch..."
+    export PKG_CONFIG_PATH="$ogg_prefix/lib/pkgconfig"
+    export CPPFLAGS="-I$ogg_prefix/include"
+    export LDFLAGS="$LDFLAGS -L$ogg_prefix/lib"
+
+    run_configure_make_install "$VORBIS_DIR" "$vorbis_build_dir" "$vorbis_prefix" \
+        --build="$BUILD_MACHINE" --host="$host" cross_compiling=yes \
+        --with-ogg="$ogg_prefix" \
+        --disable-examples \
+        --disable-oggtest
+
+    copy_to_output "catalyst" "$arch" "$ogg_prefix" "$vorbis_prefix"
 }
 
 build_android_abi() {
@@ -406,11 +471,17 @@ mkdir -p "$OUTPUT_DIR"
 # Build macOS (arm64 and x86_64)
 build_macos_arch arm64
 build_macos_arch x86_64
+create_fat_binary "macos" "arm64" "x86_64"
 
 # Build iOS (device and simulator)
 build_ios iphoneos arm64 aarch64-apple-darwin
 build_ios iphonesimulator arm64 aarch64-apple-darwin
 build_ios iphonesimulator x86_64 x86_64-apple-darwin
+
+# Build Mac Catalyst (arm64 and x86_64)
+build_catalyst arm64 aarch64-apple-darwin
+build_catalyst x86_64 x86_64-apple-darwin
+create_fat_binary "catalyst" "arm64" "x86_64"
 
 # Build Android (4 ABIs)
 build_android_abi arm64-v8a   aarch64-linux-android      "aarch64-linux-android${ANDROID_API}"
@@ -423,7 +494,8 @@ echo "============================================"
 echo "Done building libvorbis v$VORBIS_VERSION (with libogg v$OGG_VERSION)"
 echo "============================================"
 echo "Artifacts are in: $OUTPUT_DIR"
-echo "  macOS:   $OUTPUT_DIR/macos/{arm64,x86_64}/lib/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a"
-echo "  iOS:     $OUTPUT_DIR/ios/{iphoneos-arm64,iphonesimulator-arm64,iphonesimulator-x86_64}/lib/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a"
-echo "  Android: $OUTPUT_DIR/android/{arm64-v8a,armeabi-v7a,x86_64,x86}/lib/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a"
+echo "  macOS:    $OUTPUT_DIR/macos/{arm64,x86_64,fat}/lib/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a"
+echo "  iOS:      $OUTPUT_DIR/ios/{iphoneos-arm64,iphonesimulator-arm64,iphonesimulator-x86_64}/lib/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a"
+echo "  Catalyst: $OUTPUT_DIR/catalyst/{arm64,x86_64,fat}/lib/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a"
+echo "  Android:  $OUTPUT_DIR/android/{arm64-v8a,armeabi-v7a,x86_64,x86}/lib/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a"
 echo "============================================"
