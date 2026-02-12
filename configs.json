@@ -1,0 +1,11 @@
+{
+  "opus": {
+    "version": "1.6.1"
+  },
+  "ogg": {
+    "version": "1.3.5"
+  },
+  "vorbis": {
+    "version": "1.3.7"
+  }
+}
