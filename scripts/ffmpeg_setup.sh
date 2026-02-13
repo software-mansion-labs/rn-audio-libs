@@ -5,7 +5,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$SCRIPT_DIR"
+ROOT_DIR="$SCRIPT_DIR/.."
 SOURCES_DIR="$ROOT_DIR/sources"
 SOURCE_DIR="$SOURCES_DIR/ffmpeg"
 BUILD_DIR="$ROOT_DIR/build/ffmpeg"
@@ -536,7 +536,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     echo "Mac Catalyst builds completed!"
 
     # create frameworks from binaries
-    bash ./create_xcframework.sh
+    bash "$SCRIPT_DIR/create_xcframework.sh"
     
     echo "Apple platform builds completed!"
 else
