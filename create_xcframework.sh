@@ -79,12 +79,12 @@ create_framework() {
 ffmpeg_libs="libavcodec libavformat libavutil libswresample"
 
 for name in $ffmpeg_libs; do
-    create_framework $name output/ios/iphoneos
-    create_framework $name output/ios/iphonesimulator
+    create_framework $name outputs/ffmpeg/ios/iphoneos
+    create_framework $name outputs/ffmpeg/ios/iphonesimulator
 done
 
 # Create XCFramework:
-OUTPUT_DIR="output/ios"
+OUTPUT_DIR="outputs/ffmpeg/ios"
 
 xcodebuild -create-xcframework \
     -framework "${OUTPUT_DIR}/iphoneos/framework/libavcodec.framework" \

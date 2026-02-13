@@ -1,17 +1,34 @@
 #!/bin/bash
 
 # FFmpeg Mobile Architecture Build Script
-# Builds shared ffmpeg binaries for iOS and Android architectures
+# Builds shared ffmpeg binaries for iOS, macOS, Mac Catalyst, and Android architectures
 set -e
 
-SOURCE_DIR="/path/to/your/ffmpeg"  # Change this to your FFmpeg source directory
-if [ ! -d "${SOURCE_DIR}" ]; then
-    echo "FFmpeg source directory does not exist: ${SOURCE_DIR}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$SCRIPT_DIR"
+SOURCES_DIR="$ROOT_DIR/sources"
+SOURCE_DIR="$SOURCES_DIR/ffmpeg"
+BUILD_DIR="$ROOT_DIR/build/ffmpeg"
+OUTPUT_DIR="$ROOT_DIR/outputs/ffmpeg"
+
+# Read FFmpeg version from configs.json
+CONFIG_FILE="$ROOT_DIR/configs.json"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Error: configs.json not found at $CONFIG_FILE"
     exit 1
 fi
 
-BUILD_DIR="$(pwd)/build"
-OUTPUT_DIR="$(pwd)/output"
+FFMPEG_VERSION=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE'))['ffmpeg']['version'])")
+
+if [ -z "$FFMPEG_VERSION" ]; then
+    echo "Error: Could not read ffmpeg version from configs.json"
+    exit 1
+fi
+
+IOS_MIN_VERSION="${IOS_MIN_VERSION:-15.1}"
+MACOS_MIN_VERSION="${MACOS_MIN_VERSION:-11.0}"
+
 mkdir -p "${BUILD_DIR}"
 mkdir -p "${OUTPUT_DIR}"
 
@@ -19,6 +36,38 @@ AVUTIL_VERSION="60.8.100"
 AVCODEC_VERSION="62.11.100"
 AVFORMAT_VERSION="62.3.100"
 SWRRESAMPLE_VERSION="6.1.100"
+
+# ============================================================================
+# DOWNLOAD FFMPEG SOURCE
+# ============================================================================
+
+download_ffmpeg() {
+    echo "=== Downloading FFmpeg v$FFMPEG_VERSION ==="
+
+    mkdir -p "$SOURCES_DIR"
+
+    FFMPEG_URL="https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz"
+    FFMPEG_TARBALL="$SOURCES_DIR/ffmpeg-${FFMPEG_VERSION}.tar.xz"
+
+    if [ -d "$SOURCE_DIR" ]; then
+        echo "Removing existing ffmpeg directory..."
+        rm -rf "$SOURCE_DIR"
+    fi
+
+    if [ ! -f "$FFMPEG_TARBALL" ]; then
+        echo "Downloading FFmpeg source from $FFMPEG_URL..."
+        curl -L -o "$FFMPEG_TARBALL" "$FFMPEG_URL"
+    else
+        echo "Using cached tarball: $FFMPEG_TARBALL"
+    fi
+
+    echo "Extracting FFmpeg source..."
+    tar -xJf "$FFMPEG_TARBALL" -C "$SOURCES_DIR"
+
+    mv "$SOURCES_DIR/ffmpeg-${FFMPEG_VERSION}" "$SOURCE_DIR"
+
+    echo "=== FFmpeg v$FFMPEG_VERSION downloaded to $SOURCE_DIR ==="
+}
 
 COMMON_CONFIG="
 --disable-programs
@@ -81,6 +130,12 @@ build_arch() {
         else
             ARCH_NAME="iphonesimulator_arm64"
         fi
+    elif [[ ${PLATFORM} == "macos" ]]; then
+        PLATFORM_NAME="macos"
+        ARCH_NAME="${ARCH}"
+    elif [[ ${PLATFORM} == "catalyst" ]]; then
+        PLATFORM_NAME="catalyst"
+        ARCH_NAME="${ARCH}"
     fi
 
     echo "Building FFmpeg for ${PLATFORM_NAME} ${ARCH_NAME}..."
@@ -98,17 +153,18 @@ build_arch() {
     
     make distclean 2>/dev/null || true
     
-    if [[ ${PLATFORM} == "darwinsim" ]]; then
-        PLATFORM="darwin"
+    local TARGET_OS=${PLATFORM}
+    if [[ ${PLATFORM} == "darwinsim" || ${PLATFORM} == "macos" || ${PLATFORM} == "catalyst" ]]; then
+        TARGET_OS="darwin"
     fi
 
-    echo --enable-cross-compile --arch=${ARCH} --target-os=${PLATFORM} --cc="${CC}" --cxx="${CXX}" --extra-cflags="${CFLAGS}" --extra-ldflags="${LDFLAGS}" --prefix="${OUTPUT_PATH}" ${COMMON_CONFIG} ${EXTRA_CONFIG}
+    echo --enable-cross-compile --arch=${ARCH} --target-os=${TARGET_OS} --cc="${CC}" --cxx="${CXX}" --extra-cflags="${CFLAGS}" --extra-ldflags="${LDFLAGS}" --prefix="${OUTPUT_PATH}" ${COMMON_CONFIG} ${EXTRA_CONFIG}
 
     # Configure
     ./configure \
         --enable-cross-compile \
         --arch=${ARCH} \
-        --target-os=${PLATFORM} \
+        --target-os=${TARGET_OS} \
         --cc="${CC}" \
         --cxx="${CXX}" \
         --extra-cflags="${CFLAGS}" \
@@ -125,7 +181,7 @@ build_arch() {
     cd - > /dev/null
 }
 
-fix_dynamic_ios_linkage() {
+fix_dynamic_linkage() {
     local LIB_PATH=$1
     
     # Get all dependencies that are not system libraries (including the library itself)
@@ -146,10 +202,9 @@ fix_dynamic_ios_linkage() {
     install_name_tool -id "$framework_path" "${LIB_PATH}"
 }
 
-# Check if source exists
+# Download FFmpeg source if not present
 if [ ! -d "${SOURCE_DIR}" ]; then
-    echo "FFmpeg source not found."
-    exit 1
+    download_ffmpeg
 fi
 
 # Clean the source directory of any previous builds
@@ -160,101 +215,205 @@ cd - > /dev/null
 # Use NDK_ROOT if ANDROID_NDK_ROOT is not set
 NDK_PATH="${ANDROID_NDK_ROOT:-$NDK_ROOT}"
 
-if [ ! -d "$NDK_PATH" ]; then
-    echo "Android NDK not found. Please set ANDROID_NDK_ROOT or NDK_ROOT environment variable"
-    exit 1
-fi
-
 API_LEVEL=21
-TOOLCHAIN_PATH="${NDK_PATH}/toolchains/llvm/prebuilt"
-export ANDROID_NDK_ROOT=${NDK_PATH}
+
+if [ -d "$NDK_PATH" ]; then
+    TOOLCHAIN_PATH="${NDK_PATH}/toolchains/llvm/prebuilt"
+    export ANDROID_NDK_ROOT=${NDK_PATH}
+fi
 
 # Detect host OS for toolchain
 if [[ "$OSTYPE" == "darwin"* ]]; then
     HOST_TAG="darwin-x86_64"
 elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
     HOST_TAG="linux-x86_64"
-else
-    echo "Unsupported host OS for Android NDK"
-    exit 1
 fi
 
-TOOLCHAIN="${TOOLCHAIN_PATH}/${HOST_TAG}"
-PATH=$TOOLCHAIN/bin:$PATH
+if [ -d "$NDK_PATH" ]; then
+    TOOLCHAIN="${TOOLCHAIN_PATH}/${HOST_TAG}"
+    PATH=$TOOLCHAIN/bin:$PATH
+fi
 
-OPENSSL_PREBUILT_FOLDER="$(pwd)/openssl-prebuilt"
+OPENSSL_PREBUILT_FOLDER="${ROOT_DIR}/build/openssl-prebuilt"
 if [ ! -d "$OPENSSL_PREBUILT_FOLDER" ]; then
     echo "Cloning and building OpenSSL..."
-    if [ ! -d "openssl" ]; then
-        git clone https://github.com/openssl/openssl.git
+    OPENSSL_BUILD_DIR="$BUILD_DIR/openssl"
+    if [ ! -d "$OPENSSL_BUILD_DIR" ]; then
+        git clone https://github.com/openssl/openssl.git "$OPENSSL_BUILD_DIR"
     fi
-    cd openssl
+    cd "$OPENSSL_BUILD_DIR"
     mkdir -p "${OPENSSL_PREBUILT_FOLDER}/include"
 
     # ios-arm
+    export CFLAGS="-mios-version-min=${IOS_MIN_VERSION}"
     ./Configure ios64-xcrun no-shared no-asm no-tests
     make build_libs -j10
     mkdir -p ${OPENSSL_PREBUILT_FOLDER}/iphoneos && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/iphoneos"
     cp -r include/crypto include/openssl "${OPENSSL_PREBUILT_FOLDER}/include"
     make clean
+    unset CFLAGS
 
     # arm-simulator
+    export CFLAGS="-mios-simulator-version-min=${IOS_MIN_VERSION}"
     ./Configure iossimulator-arm64-xcrun no-shared no-asm no-tests
     make build_libs -j10
     mkdir -p ${OPENSSL_PREBUILT_FOLDER}/iphonesimulator && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/iphonesimulator"
     make clean
+    unset CFLAGS
 
     # x86_64-simulator
+    export CFLAGS="-mios-simulator-version-min=${IOS_MIN_VERSION}"
     ./Configure iossimulator-x86_64-xcrun no-shared no-asm no-tests
     make build_libs -j10
     mkdir -p ${OPENSSL_PREBUILT_FOLDER}/iphonesimulator-x86_64 && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/iphonesimulator-x86_64"
     make clean
+    unset CFLAGS
+
+    # macOS arm64
+    export CFLAGS="-mmacosx-version-min=${MACOS_MIN_VERSION}"
+    ./Configure darwin64-arm64-cc no-shared no-asm no-tests
+    make build_libs -j10
+    mkdir -p ${OPENSSL_PREBUILT_FOLDER}/macos-arm64 && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/macos-arm64"
+    make clean
+    unset CFLAGS
+
+    # macOS x86_64
+    export CFLAGS="-mmacosx-version-min=${MACOS_MIN_VERSION}"
+    ./Configure darwin64-x86_64-cc no-shared no-asm no-tests
+    make build_libs -j10
+    mkdir -p ${OPENSSL_PREBUILT_FOLDER}/macos-x86_64 && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/macos-x86_64"
+    make clean
+    unset CFLAGS
+
+    # Mac Catalyst arm64
+    export CFLAGS="-target arm64-apple-ios${IOS_MIN_VERSION}-macabi"
+    ./Configure darwin64-arm64-cc no-shared no-asm no-tests
+    make build_libs -j10
+    mkdir -p ${OPENSSL_PREBUILT_FOLDER}/catalyst-arm64 && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/catalyst-arm64"
+    make clean
+    unset CFLAGS
+
+    # Mac Catalyst x86_64
+    export CFLAGS="-target x86_64-apple-ios${IOS_MIN_VERSION}-macabi"
+    ./Configure darwin64-x86_64-cc no-shared no-asm no-tests
+    make build_libs -j10
+    mkdir -p ${OPENSSL_PREBUILT_FOLDER}/catalyst-x86_64 && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/catalyst-x86_64"
+    make clean
+    unset CFLAGS
 
     # arm64-v8a
-    ./Configure android-arm64 no-shared no-asm no-tests -D__ANDROID_API__=${API_LEVEL}
-    make build_libs -j10
-    mkdir -p ${OPENSSL_PREBUILT_FOLDER}/arm64-v8a && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/arm64-v8a"
-    make clean
+    if [ -d "$NDK_PATH" ]; then
+        ./Configure android-arm64 no-shared no-asm no-tests -D__ANDROID_API__=${API_LEVEL}
+        make build_libs -j10
+        mkdir -p ${OPENSSL_PREBUILT_FOLDER}/arm64-v8a && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/arm64-v8a"
+        make clean
 
-    # armeabi-v7a
-    ./Configure android-arm no-shared no-asm no-tests -D__ANDROID_API__=${API_LEVEL}
-    make build_libs -j10
-    mkdir -p ${OPENSSL_PREBUILT_FOLDER}/armeabi-v7a && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/armeabi-v7a"
-    make clean
+        # armeabi-v7a
+        ./Configure android-arm no-shared no-asm no-tests -D__ANDROID_API__=${API_LEVEL}
+        make build_libs -j10
+        mkdir -p ${OPENSSL_PREBUILT_FOLDER}/armeabi-v7a && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/armeabi-v7a"
+        make clean
 
-    ./Configure android-x86 no-shared no-asm no-tests -D__ANDROID_API__=${API_LEVEL}
-    make build_libs -j10
-    mkdir -p ${OPENSSL_PREBUILT_FOLDER}/x86 && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/x86"
-    make clean
+        ./Configure android-x86 no-shared no-asm no-tests -D__ANDROID_API__=${API_LEVEL}
+        make build_libs -j10
+        mkdir -p ${OPENSSL_PREBUILT_FOLDER}/x86 && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/x86"
+        make clean
 
-    ./Configure android-x86_64 no-shared no-asm no-tests -D__ANDROID_API__=${API_LEVEL}
-    make build_libs -j10
-    mkdir -p ${OPENSSL_PREBUILT_FOLDER}/x86_64 && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/x86_64"
-    make clean
+        ./Configure android-x86_64 no-shared no-asm no-tests -D__ANDROID_API__=${API_LEVEL}
+        make build_libs -j10
+        mkdir -p ${OPENSSL_PREBUILT_FOLDER}/x86_64 && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/x86_64"
+        make clean
+    fi
 
-    cd .. && rm -rf openssl
+    cd "$ROOT_DIR" && rm -rf "$OPENSSL_BUILD_DIR"
 fi
 
-# iOS Architectures
+# Apple Platforms (macOS, iOS, Catalyst)
 if [[ "$OSTYPE" == "darwin"* ]]; then
-    echo "Building for iOS architectures..."
+    echo "Building for Apple platforms..."
     
-    # iOS SDK paths
+    # SDK paths
+    MACOS_SDK_PATH=$(xcrun --sdk macosx --show-sdk-path)
     IOS_SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
     IOS_SIM_SDK_PATH=$(xcrun --sdk iphonesimulator --show-sdk-path)
+    
+    # =========================================================================
+    # macOS builds
+    # =========================================================================
+    echo "Building for macOS architectures..."
+
+    # macOS arm64
+    build_arch "arm64" "macos" \
+        "$(xcrun --sdk macosx --find clang)" \
+        "$(xcrun --sdk macosx --find clang++)" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include -arch arm64 -mmacosx-version-min=${MACOS_MIN_VERSION} -isysroot ${MACOS_SDK_PATH}" \
+        "-L${OPENSSL_PREBUILT_FOLDER}/macos-arm64 -arch arm64 -mmacosx-version-min=${MACOS_MIN_VERSION} -isysroot ${MACOS_SDK_PATH}" \
+        "--disable-iconv --disable-zlib --enable-openssl --disable-securetransport"
+
+    fix_dynamic_linkage "${OUTPUT_DIR}/macos/arm64/lib/libavcodec.${AVCODEC_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/macos/arm64/lib/libavformat.${AVFORMAT_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/macos/arm64/lib/libavutil.${AVUTIL_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/macos/arm64/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib"
+    rm -rf "${OUTPUT_DIR}/macos/arm64/share"
+
+    # macOS x86_64
+    build_arch "x86_64" "macos" \
+        "$(xcrun --sdk macosx --find clang)" \
+        "$(xcrun --sdk macosx --find clang++)" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include -arch x86_64 -mmacosx-version-min=${MACOS_MIN_VERSION} -isysroot ${MACOS_SDK_PATH}" \
+        "-L${OPENSSL_PREBUILT_FOLDER}/macos-x86_64 -arch x86_64 -mmacosx-version-min=${MACOS_MIN_VERSION} -isysroot ${MACOS_SDK_PATH}" \
+        "--disable-iconv --disable-zlib --enable-openssl --disable-securetransport"
+
+    fix_dynamic_linkage "${OUTPUT_DIR}/macos/x86_64/lib/libavcodec.${AVCODEC_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/macos/x86_64/lib/libavformat.${AVFORMAT_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/macos/x86_64/lib/libavutil.${AVUTIL_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/macos/x86_64/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib"
+    rm -rf "${OUTPUT_DIR}/macos/x86_64/share"
+
+    # Create universal macOS libraries
+    mkdir -p "${OUTPUT_DIR}/macos/fat/lib"
+    lipo -create \
+        "${OUTPUT_DIR}/macos/arm64/lib/libavcodec.${AVCODEC_VERSION}.dylib" \
+        "${OUTPUT_DIR}/macos/x86_64/lib/libavcodec.${AVCODEC_VERSION}.dylib" \
+        -output "${OUTPUT_DIR}/macos/fat/lib/libavcodec.${AVCODEC_VERSION}.dylib"
+    lipo -create \
+        "${OUTPUT_DIR}/macos/arm64/lib/libavformat.${AVFORMAT_VERSION}.dylib" \
+        "${OUTPUT_DIR}/macos/x86_64/lib/libavformat.${AVFORMAT_VERSION}.dylib" \
+        -output "${OUTPUT_DIR}/macos/fat/lib/libavformat.${AVFORMAT_VERSION}.dylib"
+    lipo -create \
+        "${OUTPUT_DIR}/macos/arm64/lib/libavutil.${AVUTIL_VERSION}.dylib" \
+        "${OUTPUT_DIR}/macos/x86_64/lib/libavutil.${AVUTIL_VERSION}.dylib" \
+        -output "${OUTPUT_DIR}/macos/fat/lib/libavutil.${AVUTIL_VERSION}.dylib"
+    lipo -create \
+        "${OUTPUT_DIR}/macos/arm64/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib" \
+        "${OUTPUT_DIR}/macos/x86_64/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib" \
+        -output "${OUTPUT_DIR}/macos/fat/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib"
+
+    mv "${OUTPUT_DIR}/macos/fat/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib" "${OUTPUT_DIR}/macos/fat/lib/libswresample.dylib"
+    mv "${OUTPUT_DIR}/macos/fat/lib/libavutil.${AVUTIL_VERSION}.dylib" "${OUTPUT_DIR}/macos/fat/lib/libavutil.dylib"
+    mv "${OUTPUT_DIR}/macos/fat/lib/libavformat.${AVFORMAT_VERSION}.dylib" "${OUTPUT_DIR}/macos/fat/lib/libavformat.dylib"
+    mv "${OUTPUT_DIR}/macos/fat/lib/libavcodec.${AVCODEC_VERSION}.dylib" "${OUTPUT_DIR}/macos/fat/lib/libavcodec.dylib"
+    cp -R "${OUTPUT_DIR}/macos/arm64/include" "${OUTPUT_DIR}/macos/fat/"
+
+    echo "macOS builds completed!"
+
+    # =========================================================================
+    # iOS builds
+    # =========================================================================
+    echo "Building for iOS architectures..."
     
     # iOS Device architecture
     build_arch "arm64" "darwin" \
         "$(xcrun --sdk iphoneos --find clang)" \
         "$(xcrun --sdk iphoneos --find clang++)" \
-        "-I${OPENSSL_PREBUILT_FOLDER}/include -arch arm64 -mios-version-min=11.0 -isysroot ${IOS_SDK_PATH}" \
-        "-L${OPENSSL_PREBUILT_FOLDER}/iphoneos -arch arm64 -mios-version-min=11.0 -isysroot ${IOS_SDK_PATH}" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include -arch arm64 -mios-version-min=${IOS_MIN_VERSION} -isysroot ${IOS_SDK_PATH}" \
+        "-L${OPENSSL_PREBUILT_FOLDER}/iphoneos -arch arm64 -mios-version-min=${IOS_MIN_VERSION} -isysroot ${IOS_SDK_PATH}" \
         "--disable-iconv --disable-zlib --enable-openssl --disable-securetransport"
 
-    fix_dynamic_ios_linkage "${OUTPUT_DIR}/ios/iphoneos/lib/libavcodec.${AVCODEC_VERSION}.dylib"
-    fix_dynamic_ios_linkage "${OUTPUT_DIR}/ios/iphoneos/lib/libavformat.${AVFORMAT_VERSION}.dylib"
-    fix_dynamic_ios_linkage "${OUTPUT_DIR}/ios/iphoneos/lib/libavutil.${AVUTIL_VERSION}.dylib"
-    fix_dynamic_ios_linkage "${OUTPUT_DIR}/ios/iphoneos/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/ios/iphoneos/lib/libavcodec.${AVCODEC_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/ios/iphoneos/lib/libavformat.${AVFORMAT_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/ios/iphoneos/lib/libavutil.${AVUTIL_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/ios/iphoneos/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib"
     
     rm -rf "${OUTPUT_DIR}/ios/iphoneos/share"
 
@@ -262,14 +421,14 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     build_arch "arm64" "darwinsim" \
         "$(xcrun --sdk iphonesimulator --find clang)" \
         "$(xcrun --sdk iphonesimulator --find clang++)" \
-        "-I${OPENSSL_PREBUILT_FOLDER}/include -arch arm64 -mios-simulator-version-min=11.0 -isysroot ${IOS_SIM_SDK_PATH}" \
-        "-L${OPENSSL_PREBUILT_FOLDER}/iphonesimulator -arch arm64 -mios-simulator-version-min=11.0 -isysroot ${IOS_SIM_SDK_PATH}" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include -arch arm64 -mios-simulator-version-min=${IOS_MIN_VERSION} -isysroot ${IOS_SIM_SDK_PATH}" \
+        "-L${OPENSSL_PREBUILT_FOLDER}/iphonesimulator -arch arm64 -mios-simulator-version-min=${IOS_MIN_VERSION} -isysroot ${IOS_SIM_SDK_PATH}" \
         "--disable-iconv --disable-zlib --enable-openssl --disable-securetransport"
 
-    fix_dynamic_ios_linkage "${OUTPUT_DIR}/ios/iphonesimulator_arm64/lib/libavcodec.${AVCODEC_VERSION}.dylib"
-    fix_dynamic_ios_linkage "${OUTPUT_DIR}/ios/iphonesimulator_arm64/lib/libavformat.${AVFORMAT_VERSION}.dylib"
-    fix_dynamic_ios_linkage "${OUTPUT_DIR}/ios/iphonesimulator_arm64/lib/libavutil.${AVUTIL_VERSION}.dylib"
-    fix_dynamic_ios_linkage "${OUTPUT_DIR}/ios/iphonesimulator_arm64/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/ios/iphonesimulator_arm64/lib/libavcodec.${AVCODEC_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/ios/iphonesimulator_arm64/lib/libavformat.${AVFORMAT_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/ios/iphonesimulator_arm64/lib/libavutil.${AVUTIL_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/ios/iphonesimulator_arm64/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib"
 
     rm -rf "${OUTPUT_DIR}/ios/iphonesimulator_arm64/share"
 
@@ -277,14 +436,14 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     build_arch "x86_64" "darwinsim" \
         "$(xcrun --sdk iphonesimulator --find clang)" \
         "$(xcrun --sdk iphonesimulator --find clang++)" \
-        "-I${OPENSSL_PREBUILT_FOLDER}/include -arch x86_64 -mios-simulator-version-min=11.0 -isysroot ${IOS_SIM_SDK_PATH}" \
-        "-L${OPENSSL_PREBUILT_FOLDER}/iphonesimulator-x86_64 -arch x86_64 -mios-simulator-version-min=11.0 -isysroot ${IOS_SIM_SDK_PATH}" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include -arch x86_64 -mios-simulator-version-min=${IOS_MIN_VERSION} -isysroot ${IOS_SIM_SDK_PATH}" \
+        "-L${OPENSSL_PREBUILT_FOLDER}/iphonesimulator-x86_64 -arch x86_64 -mios-simulator-version-min=${IOS_MIN_VERSION} -isysroot ${IOS_SIM_SDK_PATH}" \
         "--disable-iconv --disable-zlib --enable-openssl --disable-securetransport"
 
-    fix_dynamic_ios_linkage "${OUTPUT_DIR}/ios/iphonesimulator_x86_64/lib/libavcodec.${AVCODEC_VERSION}.dylib"
-    fix_dynamic_ios_linkage "${OUTPUT_DIR}/ios/iphonesimulator_x86_64/lib/libavformat.${AVFORMAT_VERSION}.dylib"
-    fix_dynamic_ios_linkage "${OUTPUT_DIR}/ios/iphonesimulator_x86_64/lib/libavutil.${AVUTIL_VERSION}.dylib"
-    fix_dynamic_ios_linkage "${OUTPUT_DIR}/ios/iphonesimulator_x86_64/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/ios/iphonesimulator_x86_64/lib/libavcodec.${AVCODEC_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/ios/iphonesimulator_x86_64/lib/libavformat.${AVFORMAT_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/ios/iphonesimulator_x86_64/lib/libavutil.${AVUTIL_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/ios/iphonesimulator_x86_64/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib"
 
     rm -rf "${OUTPUT_DIR}/ios/iphonesimulator_x86_64/share"
 
@@ -314,12 +473,74 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     mv "${OUTPUT_DIR}/ios/iphonesimulator/lib/libavformat.${AVFORMAT_VERSION}.dylib" "${OUTPUT_DIR}/ios/iphonesimulator/lib/libavformat.dylib"
     mv "${OUTPUT_DIR}/ios/iphonesimulator/lib/libavcodec.${AVCODEC_VERSION}.dylib" "${OUTPUT_DIR}/ios/iphonesimulator/lib/libavcodec.dylib"
 
+    echo "iOS builds completed!"
+
+    # =========================================================================
+    # Mac Catalyst builds
+    # =========================================================================
+    echo "Building for Mac Catalyst architectures..."
+
+    # Mac Catalyst arm64
+    build_arch "arm64" "catalyst" \
+        "$(xcrun --sdk macosx --find clang)" \
+        "$(xcrun --sdk macosx --find clang++)" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include -target arm64-apple-ios${IOS_MIN_VERSION}-macabi -isysroot ${MACOS_SDK_PATH}" \
+        "-L${OPENSSL_PREBUILT_FOLDER}/catalyst-arm64 -target arm64-apple-ios${IOS_MIN_VERSION}-macabi -isysroot ${MACOS_SDK_PATH}" \
+        "--disable-iconv --disable-zlib --enable-openssl --disable-securetransport"
+
+    fix_dynamic_linkage "${OUTPUT_DIR}/catalyst/arm64/lib/libavcodec.${AVCODEC_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/catalyst/arm64/lib/libavformat.${AVFORMAT_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/catalyst/arm64/lib/libavutil.${AVUTIL_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/catalyst/arm64/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib"
+    rm -rf "${OUTPUT_DIR}/catalyst/arm64/share"
+
+    # Mac Catalyst x86_64
+    build_arch "x86_64" "catalyst" \
+        "$(xcrun --sdk macosx --find clang)" \
+        "$(xcrun --sdk macosx --find clang++)" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include -target x86_64-apple-ios${IOS_MIN_VERSION}-macabi -isysroot ${MACOS_SDK_PATH}" \
+        "-L${OPENSSL_PREBUILT_FOLDER}/catalyst-x86_64 -target x86_64-apple-ios${IOS_MIN_VERSION}-macabi -isysroot ${MACOS_SDK_PATH}" \
+        "--disable-iconv --disable-zlib --enable-openssl --disable-securetransport"
+
+    fix_dynamic_linkage "${OUTPUT_DIR}/catalyst/x86_64/lib/libavcodec.${AVCODEC_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/catalyst/x86_64/lib/libavformat.${AVFORMAT_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/catalyst/x86_64/lib/libavutil.${AVUTIL_VERSION}.dylib"
+    fix_dynamic_linkage "${OUTPUT_DIR}/catalyst/x86_64/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib"
+    rm -rf "${OUTPUT_DIR}/catalyst/x86_64/share"
+
+    # Create universal catalyst libraries
+    mkdir -p "${OUTPUT_DIR}/catalyst/fat/lib"
+    lipo -create \
+        "${OUTPUT_DIR}/catalyst/arm64/lib/libavcodec.${AVCODEC_VERSION}.dylib" \
+        "${OUTPUT_DIR}/catalyst/x86_64/lib/libavcodec.${AVCODEC_VERSION}.dylib" \
+        -output "${OUTPUT_DIR}/catalyst/fat/lib/libavcodec.${AVCODEC_VERSION}.dylib"
+    lipo -create \
+        "${OUTPUT_DIR}/catalyst/arm64/lib/libavformat.${AVFORMAT_VERSION}.dylib" \
+        "${OUTPUT_DIR}/catalyst/x86_64/lib/libavformat.${AVFORMAT_VERSION}.dylib" \
+        -output "${OUTPUT_DIR}/catalyst/fat/lib/libavformat.${AVFORMAT_VERSION}.dylib"
+    lipo -create \
+        "${OUTPUT_DIR}/catalyst/arm64/lib/libavutil.${AVUTIL_VERSION}.dylib" \
+        "${OUTPUT_DIR}/catalyst/x86_64/lib/libavutil.${AVUTIL_VERSION}.dylib" \
+        -output "${OUTPUT_DIR}/catalyst/fat/lib/libavutil.${AVUTIL_VERSION}.dylib"
+    lipo -create \
+        "${OUTPUT_DIR}/catalyst/arm64/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib" \
+        "${OUTPUT_DIR}/catalyst/x86_64/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib" \
+        -output "${OUTPUT_DIR}/catalyst/fat/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib"
+
+    mv "${OUTPUT_DIR}/catalyst/fat/lib/libswresample.${SWRRESAMPLE_VERSION}.dylib" "${OUTPUT_DIR}/catalyst/fat/lib/libswresample.dylib"
+    mv "${OUTPUT_DIR}/catalyst/fat/lib/libavutil.${AVUTIL_VERSION}.dylib" "${OUTPUT_DIR}/catalyst/fat/lib/libavutil.dylib"
+    mv "${OUTPUT_DIR}/catalyst/fat/lib/libavformat.${AVFORMAT_VERSION}.dylib" "${OUTPUT_DIR}/catalyst/fat/lib/libavformat.dylib"
+    mv "${OUTPUT_DIR}/catalyst/fat/lib/libavcodec.${AVCODEC_VERSION}.dylib" "${OUTPUT_DIR}/catalyst/fat/lib/libavcodec.dylib"
+    cp -R "${OUTPUT_DIR}/catalyst/arm64/include" "${OUTPUT_DIR}/catalyst/fat/"
+
+    echo "Mac Catalyst builds completed!"
+
     # create frameworks from binaries
     bash ./create_xcframework.sh
     
-    echo "iOS builds completed!"
+    echo "Apple platform builds completed!"
 else
-    echo "Skipping iOS builds (requires macOS)"
+    echo "Skipping Apple platform builds (requires macOS)"
 fi
 
 # Android Architectures
