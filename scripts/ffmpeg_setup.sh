@@ -8,8 +8,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$SCRIPT_DIR/.."
 SOURCES_DIR="$ROOT_DIR/sources"
 SOURCE_DIR="$SOURCES_DIR/ffmpeg"
-BUILD_DIR="$ROOT_DIR/build/ffmpeg"
-OUTPUT_DIR="$ROOT_DIR/outputs/ffmpeg"
+BUILD_DIR="$ROOT_DIR/build/intermediate/ffmpeg"
+OUTPUT_DIR="$BUILD_DIR/output"
+FFMPEG_INCLUDE_OUTPUT_DIR="$ROOT_DIR/outputs/include_ffmpeg"
+FFMPEG_IOS_OUTPUT_DIR="$ROOT_DIR/outputs/ffmpeg_ios"
+FFMPEG_ANDROID_OUTPUT_DIR="$ROOT_DIR/outputs/ffmpeg_android"
 
 # Read FFmpeg version from configs.json
 CONFIG_FILE="$ROOT_DIR/configs.json"
@@ -31,6 +34,9 @@ MACOS_MIN_VERSION="${MACOS_MIN_VERSION:-11.0}"
 
 mkdir -p "${BUILD_DIR}"
 mkdir -p "${OUTPUT_DIR}"
+mkdir -p "${FFMPEG_INCLUDE_OUTPUT_DIR}"
+mkdir -p "${FFMPEG_IOS_OUTPUT_DIR}"
+mkdir -p "${FFMPEG_ANDROID_OUTPUT_DIR}"
 
 AVUTIL_VERSION="60.8.100"
 AVCODEC_VERSION="62.11.100"
@@ -143,18 +149,15 @@ build_arch() {
 
     echo "Building FFmpeg for ${PLATFORM_NAME} ${ARCH_NAME}..."
     
-    SOURCE_PATH="${BUILD_DIR}/ffmpeg-${PLATFORM_NAME}-${ARCH_NAME}"
+    SOURCE_PATH="${BUILD_DIR}/ffmpeg-${PLATFORM_NAME}-${ARCH_NAME}-run-$(date +%s)-$$-$RANDOM"
     OUTPUT_PATH="${OUTPUT_DIR}/${PLATFORM_NAME}/${ARCH_NAME}"
     
     mkdir -p "${OUTPUT_PATH}"
     
     echo "Copying source for ${PLATFORM_NAME} ${ARCH_NAME}..."
-    rm -rf "${SOURCE_PATH}"
     cp -r "${SOURCE_DIR}" "${SOURCE_PATH}"
     
     cd "${SOURCE_PATH}"
-    
-    make distclean 2>/dev/null || true
     
     local TARGET_OS=${PLATFORM}
     if [[ ${PLATFORM} == "darwinsim" || ${PLATFORM} == "macos" || ${PLATFORM} == "catalyst" ]]; then
@@ -205,6 +208,43 @@ fix_dynamic_linkage() {
     install_name_tool -id "$framework_path" "${LIB_PATH}"
 }
 
+sync_ffmpeg_headers() {
+    local src_include_dir="${OUTPUT_DIR}/ios/iphoneos/include"
+    if [ ! -d "${src_include_dir}" ]; then
+        echo "Error: FFmpeg iOS headers not found at ${src_include_dir}"
+        exit 1
+    fi
+
+    mkdir -p "${FFMPEG_INCLUDE_OUTPUT_DIR}"
+    cp -R "${src_include_dir}/." "${FFMPEG_INCLUDE_OUTPUT_DIR}/"
+}
+
+sync_ffmpeg_android_libs() {
+    local src_root="${OUTPUT_DIR}/android"
+    if [ ! -d "${src_root}" ]; then
+        echo "Error: FFmpeg Android libs not found at ${src_root}"
+        exit 1
+    fi
+
+    mkdir -p "${FFMPEG_ANDROID_OUTPUT_DIR}"
+
+    local abi_dir
+    for abi_dir in "${src_root}"/*; do
+        [ -d "${abi_dir}" ] || continue
+
+        local abi_name
+        abi_name="$(basename "${abi_dir}")"
+        local src_lib_dir="${abi_dir}/lib"
+        local dest_lib_dir="${FFMPEG_ANDROID_OUTPUT_DIR}/${abi_name}"
+
+        [ -d "${src_lib_dir}" ] || continue
+
+        rm -rf "${dest_lib_dir}"
+        mkdir -p "${dest_lib_dir}"
+        cp -R "${src_lib_dir}/." "${dest_lib_dir}/"
+    done
+}
+
 # Download FFmpeg source if not present
 if [ ! -d "${SOURCE_DIR}" ]; then
     download_ffmpeg
@@ -237,98 +277,78 @@ if [ -d "$NDK_PATH" ]; then
     PATH=$TOOLCHAIN/bin:$PATH
 fi
 
-OPENSSL_PREBUILT_FOLDER="${ROOT_DIR}/build/openssl-prebuilt"
+OPENSSL_PREBUILT_FOLDER="${ROOT_DIR}/build/intermediate/openssl-prebuilt"
 if [ ! -d "$OPENSSL_PREBUILT_FOLDER" ]; then
     echo "Cloning and building OpenSSL..."
-    OPENSSL_BUILD_DIR="$BUILD_DIR/openssl"
-    if [ ! -d "$OPENSSL_BUILD_DIR" ]; then
-        git clone https://github.com/openssl/openssl.git "$OPENSSL_BUILD_DIR"
+    OPENSSL_SOURCE_DIR="$BUILD_DIR/openssl-src"
+    if [ ! -d "$OPENSSL_SOURCE_DIR" ]; then
+        git clone https://github.com/openssl/openssl.git "$OPENSSL_SOURCE_DIR"
     fi
-    cd "$OPENSSL_BUILD_DIR"
-    mkdir -p "${OPENSSL_PREBUILT_FOLDER}/include"
+
+    build_openssl_variant() {
+        local variant_name="$1"
+        local openssl_target="$2"
+        local output_subdir="$3"
+        local variant_cflags="$4"
+        local extra_config="${5:-}"
+
+        local variant_dir="${BUILD_DIR}/openssl-${variant_name}-run-$(date +%s)-$$-$RANDOM"
+        cp -R "$OPENSSL_SOURCE_DIR" "$variant_dir"
+        cd "$variant_dir"
+
+        if [ -n "$variant_cflags" ]; then
+            export CFLAGS="$variant_cflags"
+        else
+            unset CFLAGS
+        fi
+
+        if [ -n "$extra_config" ]; then
+            ./Configure "$openssl_target" no-shared no-asm no-tests "$extra_config"
+        else
+            ./Configure "$openssl_target" no-shared no-asm no-tests
+        fi
+
+        make build_libs -j10
+        mkdir -p "${OPENSSL_PREBUILT_FOLDER}/${output_subdir}"
+        cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/${output_subdir}"
+        local include_dir="${OPENSSL_PREBUILT_FOLDER}/include-${output_subdir}"
+        mkdir -p "${include_dir}"
+        cp -r include/crypto include/openssl "${include_dir}"
+        cd "$ROOT_DIR"
+    }
 
     # ios-arm
-    export CFLAGS="-mios-version-min=${IOS_MIN_VERSION}"
-    ./Configure ios64-xcrun no-shared no-asm no-tests
-    make build_libs -j10
-    mkdir -p ${OPENSSL_PREBUILT_FOLDER}/iphoneos && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/iphoneos"
-    cp -r include/crypto include/openssl "${OPENSSL_PREBUILT_FOLDER}/include"
-    make clean
-    unset CFLAGS
+    build_openssl_variant "iphoneos" "ios64-xcrun" "iphoneos" "-mios-version-min=${IOS_MIN_VERSION}"
 
     # arm-simulator
-    export CFLAGS="-mios-simulator-version-min=${IOS_MIN_VERSION}"
-    ./Configure iossimulator-arm64-xcrun no-shared no-asm no-tests
-    make build_libs -j10
-    mkdir -p ${OPENSSL_PREBUILT_FOLDER}/iphonesimulator && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/iphonesimulator"
-    make clean
-    unset CFLAGS
+    build_openssl_variant "iphonesimulator-arm64" "iossimulator-arm64-xcrun" "iphonesimulator" "-mios-simulator-version-min=${IOS_MIN_VERSION}"
 
     # x86_64-simulator
-    export CFLAGS="-mios-simulator-version-min=${IOS_MIN_VERSION}"
-    ./Configure iossimulator-x86_64-xcrun no-shared no-asm no-tests
-    make build_libs -j10
-    mkdir -p ${OPENSSL_PREBUILT_FOLDER}/iphonesimulator-x86_64 && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/iphonesimulator-x86_64"
-    make clean
-    unset CFLAGS
+    build_openssl_variant "iphonesimulator-x86_64" "iossimulator-x86_64-xcrun" "iphonesimulator-x86_64" "-mios-simulator-version-min=${IOS_MIN_VERSION}"
 
     # macOS arm64
-    export CFLAGS="-mmacosx-version-min=${MACOS_MIN_VERSION}"
-    ./Configure darwin64-arm64-cc no-shared no-asm no-tests
-    make build_libs -j10
-    mkdir -p ${OPENSSL_PREBUILT_FOLDER}/macos-arm64 && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/macos-arm64"
-    make clean
-    unset CFLAGS
+    build_openssl_variant "macos-arm64" "darwin64-arm64-cc" "macos-arm64" "-mmacosx-version-min=${MACOS_MIN_VERSION}"
 
     # macOS x86_64
-    export CFLAGS="-mmacosx-version-min=${MACOS_MIN_VERSION}"
-    ./Configure darwin64-x86_64-cc no-shared no-asm no-tests
-    make build_libs -j10
-    mkdir -p ${OPENSSL_PREBUILT_FOLDER}/macos-x86_64 && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/macos-x86_64"
-    make clean
-    unset CFLAGS
+    build_openssl_variant "macos-x86_64" "darwin64-x86_64-cc" "macos-x86_64" "-mmacosx-version-min=${MACOS_MIN_VERSION}"
 
     # Mac Catalyst arm64
-    export CFLAGS="-target arm64-apple-ios${IOS_MIN_VERSION}-macabi"
-    ./Configure darwin64-arm64-cc no-shared no-asm no-tests
-    make build_libs -j10
-    mkdir -p ${OPENSSL_PREBUILT_FOLDER}/catalyst-arm64 && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/catalyst-arm64"
-    make clean
-    unset CFLAGS
+    build_openssl_variant "catalyst-arm64" "darwin64-arm64-cc" "catalyst-arm64" "-target arm64-apple-ios${IOS_MIN_VERSION}-macabi"
 
     # Mac Catalyst x86_64
-    export CFLAGS="-target x86_64-apple-ios${IOS_MIN_VERSION}-macabi"
-    ./Configure darwin64-x86_64-cc no-shared no-asm no-tests
-    make build_libs -j10
-    mkdir -p ${OPENSSL_PREBUILT_FOLDER}/catalyst-x86_64 && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/catalyst-x86_64"
-    make clean
-    unset CFLAGS
+    build_openssl_variant "catalyst-x86_64" "darwin64-x86_64-cc" "catalyst-x86_64" "-target x86_64-apple-ios${IOS_MIN_VERSION}-macabi"
 
     # arm64-v8a
     if [ -d "$NDK_PATH" ]; then
-        ./Configure android-arm64 no-shared no-asm no-tests -D__ANDROID_API__=${API_LEVEL}
-        make build_libs -j10
-        mkdir -p ${OPENSSL_PREBUILT_FOLDER}/arm64-v8a && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/arm64-v8a"
-        make clean
+        build_openssl_variant "android-arm64-v8a" "android-arm64" "arm64-v8a" "" "-D__ANDROID_API__=${API_LEVEL}"
 
         # armeabi-v7a
-        ./Configure android-arm no-shared no-asm no-tests -D__ANDROID_API__=${API_LEVEL}
-        make build_libs -j10
-        mkdir -p ${OPENSSL_PREBUILT_FOLDER}/armeabi-v7a && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/armeabi-v7a"
-        make clean
+        build_openssl_variant "android-armeabi-v7a" "android-arm" "armeabi-v7a" "" "-D__ANDROID_API__=${API_LEVEL}"
 
-        ./Configure android-x86 no-shared no-asm no-tests -D__ANDROID_API__=${API_LEVEL}
-        make build_libs -j10
-        mkdir -p ${OPENSSL_PREBUILT_FOLDER}/x86 && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/x86"
-        make clean
+        build_openssl_variant "android-x86" "android-x86" "x86" "" "-D__ANDROID_API__=${API_LEVEL}"
 
-        ./Configure android-x86_64 no-shared no-asm no-tests -D__ANDROID_API__=${API_LEVEL}
-        make build_libs -j10
-        mkdir -p ${OPENSSL_PREBUILT_FOLDER}/x86_64 && cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/x86_64"
-        make clean
+        build_openssl_variant "android-x86_64" "android-x86_64" "x86_64" "" "-D__ANDROID_API__=${API_LEVEL}"
     fi
-
-    cd "$ROOT_DIR" && rm -rf "$OPENSSL_BUILD_DIR"
 fi
 
 # Apple Platforms (macOS, iOS, Catalyst)
@@ -349,7 +369,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     build_arch "arm64" "macos" \
         "$(xcrun --sdk macosx --find clang)" \
         "$(xcrun --sdk macosx --find clang++)" \
-        "-I${OPENSSL_PREBUILT_FOLDER}/include -arch arm64 -mmacosx-version-min=${MACOS_MIN_VERSION} -isysroot ${MACOS_SDK_PATH}" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include-macos-arm64 -arch arm64 -mmacosx-version-min=${MACOS_MIN_VERSION} -isysroot ${MACOS_SDK_PATH}" \
         "-L${OPENSSL_PREBUILT_FOLDER}/macos-arm64 -arch arm64 -mmacosx-version-min=${MACOS_MIN_VERSION} -isysroot ${MACOS_SDK_PATH}" \
         "--disable-iconv --disable-zlib --enable-openssl --disable-securetransport"
 
@@ -363,7 +383,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     build_arch "x86_64" "macos" \
         "$(xcrun --sdk macosx --find clang)" \
         "$(xcrun --sdk macosx --find clang++)" \
-        "-I${OPENSSL_PREBUILT_FOLDER}/include -arch x86_64 -mmacosx-version-min=${MACOS_MIN_VERSION} -isysroot ${MACOS_SDK_PATH}" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include-macos-x86_64 -arch x86_64 -mmacosx-version-min=${MACOS_MIN_VERSION} -isysroot ${MACOS_SDK_PATH}" \
         "-L${OPENSSL_PREBUILT_FOLDER}/macos-x86_64 -arch x86_64 -mmacosx-version-min=${MACOS_MIN_VERSION} -isysroot ${MACOS_SDK_PATH}" \
         "--disable-iconv --disable-zlib --enable-openssl --disable-securetransport"
 
@@ -409,7 +429,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     build_arch "arm64" "darwin" \
         "$(xcrun --sdk iphoneos --find clang)" \
         "$(xcrun --sdk iphoneos --find clang++)" \
-        "-I${OPENSSL_PREBUILT_FOLDER}/include -arch arm64 -mios-version-min=${IOS_MIN_VERSION} -isysroot ${IOS_SDK_PATH}" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include-iphoneos -arch arm64 -mios-version-min=${IOS_MIN_VERSION} -isysroot ${IOS_SDK_PATH}" \
         "-L${OPENSSL_PREBUILT_FOLDER}/iphoneos -arch arm64 -mios-version-min=${IOS_MIN_VERSION} -isysroot ${IOS_SDK_PATH}" \
         "--disable-iconv --disable-zlib --enable-openssl --disable-securetransport"
 
@@ -424,7 +444,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     build_arch "arm64" "darwinsim" \
         "$(xcrun --sdk iphonesimulator --find clang)" \
         "$(xcrun --sdk iphonesimulator --find clang++)" \
-        "-I${OPENSSL_PREBUILT_FOLDER}/include -arch arm64 -mios-simulator-version-min=${IOS_MIN_VERSION} -isysroot ${IOS_SIM_SDK_PATH}" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include-iphonesimulator -arch arm64 -mios-simulator-version-min=${IOS_MIN_VERSION} -isysroot ${IOS_SIM_SDK_PATH}" \
         "-L${OPENSSL_PREBUILT_FOLDER}/iphonesimulator -arch arm64 -mios-simulator-version-min=${IOS_MIN_VERSION} -isysroot ${IOS_SIM_SDK_PATH}" \
         "--disable-iconv --disable-zlib --enable-openssl --disable-securetransport"
 
@@ -439,7 +459,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     build_arch "x86_64" "darwinsim" \
         "$(xcrun --sdk iphonesimulator --find clang)" \
         "$(xcrun --sdk iphonesimulator --find clang++)" \
-        "-I${OPENSSL_PREBUILT_FOLDER}/include -arch x86_64 -mios-simulator-version-min=${IOS_MIN_VERSION} -isysroot ${IOS_SIM_SDK_PATH}" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include-iphonesimulator-x86_64 -arch x86_64 -mios-simulator-version-min=${IOS_MIN_VERSION} -isysroot ${IOS_SIM_SDK_PATH}" \
         "-L${OPENSSL_PREBUILT_FOLDER}/iphonesimulator-x86_64 -arch x86_64 -mios-simulator-version-min=${IOS_MIN_VERSION} -isysroot ${IOS_SIM_SDK_PATH}" \
         "--disable-iconv --disable-zlib --enable-openssl --disable-securetransport"
 
@@ -487,7 +507,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     build_arch "arm64" "catalyst" \
         "$(xcrun --sdk macosx --find clang)" \
         "$(xcrun --sdk macosx --find clang++)" \
-        "-I${OPENSSL_PREBUILT_FOLDER}/include -target arm64-apple-ios${IOS_MIN_VERSION}-macabi -isysroot ${MACOS_SDK_PATH}" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include-catalyst-arm64 -target arm64-apple-ios${IOS_MIN_VERSION}-macabi -isysroot ${MACOS_SDK_PATH}" \
         "-L${OPENSSL_PREBUILT_FOLDER}/catalyst-arm64 -target arm64-apple-ios${IOS_MIN_VERSION}-macabi -isysroot ${MACOS_SDK_PATH}" \
         "--disable-iconv --disable-zlib --enable-openssl --disable-securetransport"
 
@@ -501,7 +521,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     build_arch "x86_64" "catalyst" \
         "$(xcrun --sdk macosx --find clang)" \
         "$(xcrun --sdk macosx --find clang++)" \
-        "-I${OPENSSL_PREBUILT_FOLDER}/include -target x86_64-apple-ios${IOS_MIN_VERSION}-macabi -isysroot ${MACOS_SDK_PATH}" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include-catalyst-x86_64 -target x86_64-apple-ios${IOS_MIN_VERSION}-macabi -isysroot ${MACOS_SDK_PATH}" \
         "-L${OPENSSL_PREBUILT_FOLDER}/catalyst-x86_64 -target x86_64-apple-ios${IOS_MIN_VERSION}-macabi -isysroot ${MACOS_SDK_PATH}" \
         "--disable-iconv --disable-zlib --enable-openssl --disable-securetransport"
 
@@ -538,7 +558,11 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 
     echo "Mac Catalyst builds completed!"
 
-    # create frameworks from binaries
+    sync_ffmpeg_headers
+
+    # Create iOS XCFrameworks (ios + simulator + catalyst) in outputs/ffmpeg_ios.
+    FFMPEG_FRAMEWORK_SOURCE_DIR="${OUTPUT_DIR}" \
+    FFMPEG_XCFRAMEWORK_OUTPUT_DIR="${FFMPEG_IOS_OUTPUT_DIR}" \
     bash "$SCRIPT_DIR/create_xcframework.sh"
     
     echo "Apple platform builds completed!"
@@ -554,7 +578,7 @@ if [ -n "$ANDROID_NDK_ROOT" ] || [ -n "$NDK_ROOT" ]; then
     build_arch "aarch64" "android" \
         "${TOOLCHAIN}/bin/aarch64-linux-android${API_LEVEL}-clang" \
         "${TOOLCHAIN}/bin/aarch64-linux-android${API_LEVEL}-clang++" \
-        "-I${OPENSSL_PREBUILT_FOLDER}/include -I${TOOLCHAIN}/sysroot/usr/include -fPIC -Wl,-Bsymbolic -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include-arm64-v8a -I${TOOLCHAIN}/sysroot/usr/include -fPIC -Wl,-Bsymbolic -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
         "-L${OPENSSL_PREBUILT_FOLDER}/arm64-v8a -L${TOOLCHAIN}/sysroot/usr/lib/aarch64-linux-android/${API_LEVEL} -fPIC -Wl,-Bsymbolic -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
         "--enable-openssl --extra-libs=-lz"
 
@@ -564,7 +588,7 @@ if [ -n "$ANDROID_NDK_ROOT" ] || [ -n "$NDK_ROOT" ]; then
     build_arch "armv7a" "android" \
         "${TOOLCHAIN}/bin/armv7a-linux-androideabi${API_LEVEL}-clang" \
         "${TOOLCHAIN}/bin/armv7a-linux-androideabi${API_LEVEL}-clang++" \
-        "-I${OPENSSL_PREBUILT_FOLDER}/include -I${TOOLCHAIN}/sysroot/usr/include -fPIC -Wl,-Bsymbolic -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include-armeabi-v7a -I${TOOLCHAIN}/sysroot/usr/include -fPIC -Wl,-Bsymbolic -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
         "-L${OPENSSL_PREBUILT_FOLDER}/armeabi-v7a -L${TOOLCHAIN}/sysroot/usr/lib/arm-linux-android/${API_LEVEL} -fPIC -Wl,-Bsymbolic -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
         "--enable-openssl --extra-libs=-lz"
 
@@ -574,7 +598,7 @@ if [ -n "$ANDROID_NDK_ROOT" ] || [ -n "$NDK_ROOT" ]; then
     build_arch "x86" "android" \
         "${TOOLCHAIN}/bin/i686-linux-android${API_LEVEL}-clang" \
         "${TOOLCHAIN}/bin/i686-linux-android${API_LEVEL}-clang++" \
-        "-I${OPENSSL_PREBUILT_FOLDER}/include -I${TOOLCHAIN}/darwin-x86_64/sysroot/usr/include -fPIC -Wl,-Bsymbolic -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include-x86 -I${TOOLCHAIN}/darwin-x86_64/sysroot/usr/include -fPIC -Wl,-Bsymbolic -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
         "-L${OPENSSL_PREBUILT_FOLDER}/x86 -L${TOOLCHAIN}/darwin-x86_64/sysroot/usr/lib/i686-linux-android/${API_LEVEL} -fPIC -Wl,-Bsymbolic -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
         "--enable-openssl --extra-libs=-lz"
 
@@ -585,18 +609,18 @@ if [ -n "$ANDROID_NDK_ROOT" ] || [ -n "$NDK_ROOT" ]; then
     build_arch "x86_64" "android" \
         "${TOOLCHAIN}/bin/x86_64-linux-android${API_LEVEL}-clang" \
         "${TOOLCHAIN}/bin/x86_64-linux-android${API_LEVEL}-clang++" \
-        "-I${OPENSSL_PREBUILT_FOLDER}/include -I${TOOLCHAIN}/darwin-x86_64/sysroot/usr/include -fPIC -Wl,-Bsymbolic -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
+        "-I${OPENSSL_PREBUILT_FOLDER}/include-x86_64 -I${TOOLCHAIN}/darwin-x86_64/sysroot/usr/include -fPIC -Wl,-Bsymbolic -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
         "-L${OPENSSL_PREBUILT_FOLDER}/x86_64 -L${TOOLCHAIN}/darwin-x86_64/sysroot/usr/lib/x86_64-linux-android/${API_LEVEL} -fPIC -Wl,-Bsymbolic -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
         "--enable-openssl --extra-libs=-lz"
 
     rm -rf ${OUTPUT_DIR}/android/x86_64/share
 
+    sync_ffmpeg_android_libs
+
         
-    echo "Android builds completed!"
+    echo "Android builds completed! Exported libs: ${FFMPEG_ANDROID_OUTPUT_DIR}"
 else
     echo "Skipping Android builds (ANDROID_NDK_ROOT or NDK_ROOT not set)"
 fi
-
-rm -rf "${BUILD_DIR}"
 
 echo "All FFmpeg builds completed!"

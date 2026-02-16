@@ -4,9 +4,11 @@ set -euo pipefail
 # Build libopus, libogg, and libopusfile for macOS, iOS (device+sim), and Android (4 ABIs).
 #
 # Output layout:
-#   outputs/opus/macos/<arch>/lib/{libopus,libogg,libopusfile}.a
-#   outputs/opus/ios/<sdk>-<arch>/lib/{libopus,libogg,libopusfile}.a
-#   outputs/opus/android/<abi>/lib/{libopus,libogg,libopusfile}.a
+#   outputs/include/{ogg,opus,opusfile}
+#   outputs/android/<abi>/{libogg,libopus,libopusfile}.a
+#   outputs/iphoneos/{libogg,libopus,libopusfile}.a
+#   outputs/iphonesimulator/{libogg,libopus,libopusfile}.a
+#   outputs/macosx/{libogg,libopus,libopusfile}.a
 #
 # Usage:
 #   Run from root directory: yarn build:opus
@@ -21,8 +23,10 @@ SOURCES_DIR="$ROOT_DIR/sources"
 OPUS_DIR="$SOURCES_DIR/opus"
 OGG_DIR="$SOURCES_DIR/ogg"
 OPUSFILE_DIR="$SOURCES_DIR/opusfile"
-OUTPUT_DIR="$ROOT_DIR/outputs/opus"
-BUILD_DIR="$ROOT_DIR/build/opus"
+OUTPUT_DIR="$ROOT_DIR/outputs"
+INCLUDE_OUTPUT_DIR="$OUTPUT_DIR/include"
+BUILD_DIR="$ROOT_DIR/build/intermediate/opus"
+ARCH_LIBS_DIR="$BUILD_DIR/arch-libs"
 
 JOBS="$(sysctl -n hw.ncpu)"
 : "${JOBS:=8}"
@@ -204,11 +208,11 @@ run_configure_make_install() {
         extra_args=("$@")
     fi
 
-    mkdir -p "$build_dir"
-    rm -rf "$build_dir"/*
-    pushd "$build_dir" >/dev/null
+    local run_build_dir="${build_dir}/run-$(date +%s)-$$-$RANDOM"
+    mkdir -p "$run_build_dir"
+    pushd "$run_build_dir" >/dev/null
 
-    echo "Running configure in $build_dir"
+    echo "Running configure in $run_build_dir"
     "$source_dir/configure" \
         --prefix="$prefix_dir" \
         --disable-shared \
@@ -233,20 +237,30 @@ copy_to_output() {
     local opus_prefix="$4"
     local opusfile_prefix="$5"
 
-    local dest="$OUTPUT_DIR/$platform/$arch"
-    mkdir -p "$dest/lib" "$dest/include"
+    local dest
+    if [[ "$platform" == "android" ]]; then
+        dest="$OUTPUT_DIR/$platform/$arch"
+    else
+        dest="$ARCH_LIBS_DIR/$platform/$arch"
+    fi
+    mkdir -p "$dest"
 
     # Copy ogg
-    cp "$ogg_prefix/lib/libogg.a" "$dest/lib/"
-    cp -R "$ogg_prefix/include/ogg" "$dest/include/"
+    if [ ! -f "$dest/libogg.a" ]; then
+        cp "$ogg_prefix/lib/libogg.a" "$dest/"
+    fi
 
     # Copy opus
-    cp "$opus_prefix/lib/libopus.a" "$dest/lib/"
-    cp -R "$opus_prefix/include/opus" "$dest/include/"
+    cp "$opus_prefix/lib/libopus.a" "$dest/"
 
     # Copy opusfile
-    cp "$opusfile_prefix/lib/libopusfile.a" "$dest/lib/"
-    cp "$opusfile_prefix/include/opus/opusfile.h" "$dest/include/opus/"
+    cp "$opusfile_prefix/lib/libopusfile.a" "$dest/"
+
+    # Copy merged public headers for all platforms/libraries.
+    mkdir -p "$INCLUDE_OUTPUT_DIR/ogg" "$INCLUDE_OUTPUT_DIR/opus" "$INCLUDE_OUTPUT_DIR/opusfile"
+    cp -R "$ogg_prefix/include/ogg/." "$INCLUDE_OUTPUT_DIR/ogg/"
+    cp -R "$opus_prefix/include/opus/." "$INCLUDE_OUTPUT_DIR/opus/"
+    cp "$opusfile_prefix/include/opus/opusfile.h" "$INCLUDE_OUTPUT_DIR/opusfile/"
 }
 
 create_fat_binary() {
@@ -254,19 +268,23 @@ create_fat_binary() {
     shift
     local -a archs=("$@")
 
-    local dest="$OUTPUT_DIR/$platform/fat"
-    mkdir -p "$dest/lib"
+    local dest="$OUTPUT_DIR/$platform"
+    mkdir -p "$dest"
 
     for lib in libogg.a libopus.a libopusfile.a; do
+        if [ "$lib" = "libogg.a" ] && [ -f "$dest/$lib" ]; then
+            continue
+        fi
         local lib_paths=()
         for arch in "${archs[@]}"; do
-            lib_paths+=("$OUTPUT_DIR/$platform/$arch/lib/$lib")
+            lib_paths+=("$ARCH_LIBS_DIR/$platform/$arch/$lib")
         done
-        lipo -create "${lib_paths[@]}" -output "$dest/lib/$lib"
+        if [ "${#lib_paths[@]}" -eq 1 ]; then
+            cp "${lib_paths[0]}" "$dest/$lib"
+        else
+            lipo -create "${lib_paths[@]}" -output "$dest/$lib"
+        fi
     done
-
-    # Copy headers from first arch
-    cp -R "$OUTPUT_DIR/$platform/${archs[0]}/include" "$dest/"
 }
 
 # ============================================================================
@@ -318,7 +336,7 @@ build_macos_arch() {
     run_configure_make_install "$OPUSFILE_DIR" "$opusfile_build_dir" "$opusfile_prefix" \
         --disable-http --disable-examples
 
-    copy_to_output "macos" "$arch" "$ogg_prefix" "$opus_prefix" "$opusfile_prefix"
+    copy_to_output "macosx" "$arch" "$ogg_prefix" "$opus_prefix" "$opusfile_prefix"
 }
 
 build_ios() {
@@ -371,7 +389,7 @@ build_ios() {
         --build="$BUILD_MACHINE" --host="$host" cross_compiling=yes \
         --disable-http --disable-examples
 
-    copy_to_output "ios" "${sdk}-${arch}" "$ogg_prefix" "$opus_prefix" "$opusfile_prefix"
+    copy_to_output "$sdk" "$arch" "$ogg_prefix" "$opus_prefix" "$opusfile_prefix"
 }
 
 build_catalyst() {
@@ -424,7 +442,7 @@ build_catalyst() {
         --build="$BUILD_MACHINE" --host="$host" cross_compiling=yes \
         --disable-http --disable-examples
 
-    copy_to_output "catalyst" "$arch" "$ogg_prefix" "$opus_prefix" "$opusfile_prefix"
+    copy_to_output "macosx" "$arch" "$ogg_prefix" "$opus_prefix" "$opusfile_prefix"
 }
 
 build_android_abi() {
@@ -530,22 +548,19 @@ patch_source_tree "$OPUS_DIR"
 patch_source_tree "$OPUSFILE_DIR"
 
 # Create output directory
-mkdir -p "$OUTPUT_DIR"
-
-# Build macOS (arm64 and x86_64)
-build_macos_arch arm64
-build_macos_arch x86_64
-create_fat_binary "macos" "arm64" "x86_64"
+mkdir -p "$OUTPUT_DIR" "$INCLUDE_OUTPUT_DIR"
 
 # Build iOS (device and simulator)
 build_ios iphoneos arm64 aarch64-apple-darwin
 build_ios iphonesimulator arm64 aarch64-apple-darwin
 build_ios iphonesimulator x86_64 x86_64-apple-darwin
+create_fat_binary "iphoneos" "arm64"
+create_fat_binary "iphonesimulator" "arm64" "x86_64"
 
 # Build Mac Catalyst (arm64 and x86_64)
 build_catalyst arm64 aarch64-apple-darwin
 build_catalyst x86_64 x86_64-apple-darwin
-create_fat_binary "catalyst" "arm64" "x86_64"
+create_fat_binary "macosx" "arm64" "x86_64"
 
 # Build Android (4 ABIs)
 build_android_abi arm64-v8a   aarch64-linux-android      "aarch64-linux-android${ANDROID_API}"
@@ -558,9 +573,9 @@ echo "============================================"
 echo "Done building libopus v$OPUS_VERSION, libogg v$OGG_VERSION, libopusfile v$OPUSFILE_VERSION"
 echo "============================================"
 echo "Artifacts are in: $OUTPUT_DIR"
-echo "  macOS:    $OUTPUT_DIR/macos/{arm64,x86_64,fat}/lib/{libogg,libopus,libopusfile}.a"
-echo "  iOS:      $OUTPUT_DIR/ios/{iphoneos-arm64,iphonesimulator-arm64,iphonesimulator-x86_64}/lib/{libogg,libopus,libopusfile}.a"
-echo "  Catalyst: $OUTPUT_DIR/catalyst/{arm64,x86_64,fat}/lib/{libogg,libopus,libopusfile}.a"
-echo "  Android:  $OUTPUT_DIR/android/{arm64-v8a,armeabi-v7a,x86_64,x86}/lib/{libogg,libopus,libopusfile}.a"
+echo "  Headers:  $INCLUDE_OUTPUT_DIR/{ogg,opus,opusfile}"
+echo "  iPhoneOS: $OUTPUT_DIR/iphoneos/{libogg,libopus,libopusfile}.a"
+echo "  iOS Sim:  $OUTPUT_DIR/iphonesimulator/{libogg,libopus,libopusfile}.a"
+echo "  macOSX:   $OUTPUT_DIR/macosx/{libogg,libopus,libopusfile}.a"
+echo "  Android:  $OUTPUT_DIR/android/{arm64-v8a,armeabi-v7a,x86_64,x86}/{libogg,libopus,libopusfile}.a"
 echo "============================================"
-

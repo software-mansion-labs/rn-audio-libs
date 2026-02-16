@@ -6,6 +6,8 @@ cd "$ROOT_DIR"
 
 IOS_MIN_VERSION="${IOS_MIN_VERSION:-15.1}"
 MACOS_MIN_VERSION="${MACOS_MIN_VERSION:-11.0}"
+FFMPEG_FRAMEWORK_SOURCE_DIR="${FFMPEG_FRAMEWORK_SOURCE_DIR:-build/intermediate/ffmpeg/output}"
+FFMPEG_XCFRAMEWORK_OUTPUT_DIR="${FFMPEG_XCFRAMEWORK_OUTPUT_DIR:-outputs/ffmpeg_ios}"
 
 # Creates an Info.plist file for a given framework:
 build_info_plist() {
@@ -152,28 +154,27 @@ create_xcframework_set() {
 # ============================================================================
 echo "Creating iOS frameworks..."
 for name in $ffmpeg_libs; do
-    create_framework $name outputs/ffmpeg/ios/iphoneos ios
-    create_framework $name outputs/ffmpeg/ios/iphonesimulator ios
+    create_framework $name "${FFMPEG_FRAMEWORK_SOURCE_DIR}/ios/iphoneos" ios
+    create_framework $name "${FFMPEG_FRAMEWORK_SOURCE_DIR}/ios/iphonesimulator" ios
 done
 
 # ============================================================================
 # Mac Catalyst frameworks
 # ============================================================================
-if [ ! -d "outputs/ffmpeg/catalyst/fat/lib" ]; then
-    echo "Error: outputs/ffmpeg/catalyst/fat/lib not found; Catalyst frameworks are required for iOS XCFramework set."
+if [ ! -d "${FFMPEG_FRAMEWORK_SOURCE_DIR}/catalyst/fat/lib" ]; then
+    echo "Error: ${FFMPEG_FRAMEWORK_SOURCE_DIR}/catalyst/fat/lib not found; Catalyst frameworks are required for iOS XCFramework set."
     exit 1
 fi
 
 echo "Creating Mac Catalyst frameworks..."
 for name in $ffmpeg_libs; do
-    create_framework $name outputs/ffmpeg/catalyst/fat catalyst
+    create_framework $name "${FFMPEG_FRAMEWORK_SOURCE_DIR}/catalyst/fat" catalyst
 done
 
 echo "Creating single iOS XCFramework set (device + simulator + catalyst)..."
-create_xcframework_set "outputs/ffmpeg/ios" \
-    "outputs/ffmpeg/ios/iphoneos/framework" \
-    "outputs/ffmpeg/ios/iphonesimulator/framework" \
-    "outputs/ffmpeg/catalyst/fat/framework"
+create_xcframework_set "${FFMPEG_XCFRAMEWORK_OUTPUT_DIR}" \
+    "${FFMPEG_FRAMEWORK_SOURCE_DIR}/ios/iphoneos/framework" \
+    "${FFMPEG_FRAMEWORK_SOURCE_DIR}/ios/iphonesimulator/framework" \
+    "${FFMPEG_FRAMEWORK_SOURCE_DIR}/catalyst/fat/framework"
 
-echo "All XCFrameworks created in outputs/ffmpeg/ios"
-
+echo "All XCFrameworks created in ${FFMPEG_XCFRAMEWORK_OUTPUT_DIR}"

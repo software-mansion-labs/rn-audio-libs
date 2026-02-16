@@ -4,12 +4,11 @@ set -euo pipefail
 # Build libvorbis (and its dependency libogg) for macOS, iOS (device+sim), and Android (4 ABIs).
 #
 # Output layout:
-#   outputs/vorbis/macos/<arch>/lib/libvorbis.a
-#   outputs/vorbis/macos/<arch>/lib/libogg.a
-#   outputs/vorbis/ios/<sdk>-<arch>/lib/libvorbis.a
-#   outputs/vorbis/ios/<sdk>-<arch>/lib/libogg.a
-#   outputs/vorbis/android/<abi>/lib/libvorbis.a
-#   outputs/vorbis/android/<abi>/lib/libogg.a
+#   outputs/include/{ogg,vorbis}
+#   outputs/android/<abi>/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a
+#   outputs/iphoneos/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a
+#   outputs/iphonesimulator/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a
+#   outputs/macosx/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a
 #
 # Usage:
 #   Run from root directory: yarn build:vorbis
@@ -23,8 +22,10 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 SOURCES_DIR="$ROOT_DIR/sources"
 OGG_DIR="$SOURCES_DIR/ogg"
 VORBIS_DIR="$SOURCES_DIR/vorbis"
-OUTPUT_DIR="$ROOT_DIR/outputs/vorbis"
-BUILD_DIR="$ROOT_DIR/build/vorbis"
+OUTPUT_DIR="$ROOT_DIR/outputs"
+INCLUDE_OUTPUT_DIR="$OUTPUT_DIR/include"
+BUILD_DIR="$ROOT_DIR/build/intermediate/vorbis"
+ARCH_LIBS_DIR="$BUILD_DIR/arch-libs"
 
 JOBS="$(sysctl -n hw.ncpu)"
 : "${JOBS:=8}"
@@ -175,11 +176,11 @@ run_configure_make_install() {
         extra_args=("$@")
     fi
 
-    mkdir -p "$build_dir"
-    rm -rf "$build_dir"/*
-    pushd "$build_dir" >/dev/null
+    local run_build_dir="${build_dir}/run-$(date +%s)-$$-$RANDOM"
+    mkdir -p "$run_build_dir"
+    pushd "$run_build_dir" >/dev/null
 
-    echo "Running configure in $build_dir"
+    echo "Running configure in $run_build_dir"
     # lt_cv_apple_cc_single_mod=yes prevents libtool from using deprecated -force_cpusubtype_ALL flag
     "$source_dir/configure" \
         --prefix="$prefix_dir" \
@@ -191,7 +192,7 @@ run_configure_make_install() {
 
     # Fix libtool files to remove deprecated -force_cpusubtype_ALL flag (not supported by modern Apple linkers)
     # Patch in both build dir and source dir (in-tree builds may use source dir's libtool)
-    find "$build_dir" -name 'libtool' -type f -exec sed -i '' 's/-force_cpusubtype_ALL//g' {} \; 2>/dev/null || true
+    find "$run_build_dir" -name 'libtool' -type f -exec sed -i '' 's/-force_cpusubtype_ALL//g' {} \; 2>/dev/null || true
     find "$source_dir" -name 'libtool' -type f -exec sed -i '' 's/-force_cpusubtype_ALL//g' {} \; 2>/dev/null || true
 
     make -j"$JOBS"
@@ -206,18 +207,28 @@ copy_to_output() {
     local ogg_prefix="$3"
     local vorbis_prefix="$4"
 
-    local dest="$OUTPUT_DIR/$platform/$arch"
-    mkdir -p "$dest/lib" "$dest/include"
+    local dest
+    if [[ "$platform" == "android" ]]; then
+        dest="$OUTPUT_DIR/$platform/$arch"
+    else
+        dest="$ARCH_LIBS_DIR/$platform/$arch"
+    fi
+    mkdir -p "$dest"
 
     # Copy ogg
-    cp "$ogg_prefix/lib/libogg.a" "$dest/lib/"
-    cp -R "$ogg_prefix/include/ogg" "$dest/include/"
+    if [ ! -f "$dest/libogg.a" ]; then
+        cp "$ogg_prefix/lib/libogg.a" "$dest/"
+    fi
 
     # Copy vorbis (libvorbis, libvorbisfile, libvorbisenc)
-    cp "$vorbis_prefix/lib/libvorbis.a" "$dest/lib/"
-    cp "$vorbis_prefix/lib/libvorbisfile.a" "$dest/lib/"
-    cp "$vorbis_prefix/lib/libvorbisenc.a" "$dest/lib/"
-    cp -R "$vorbis_prefix/include/vorbis" "$dest/include/"
+    cp "$vorbis_prefix/lib/libvorbis.a" "$dest/"
+    cp "$vorbis_prefix/lib/libvorbisfile.a" "$dest/"
+    cp "$vorbis_prefix/lib/libvorbisenc.a" "$dest/"
+
+    # Copy merged public headers for all platforms/libraries.
+    mkdir -p "$INCLUDE_OUTPUT_DIR/ogg" "$INCLUDE_OUTPUT_DIR/vorbis"
+    cp -R "$ogg_prefix/include/ogg/." "$INCLUDE_OUTPUT_DIR/ogg/"
+    cp -R "$vorbis_prefix/include/vorbis/." "$INCLUDE_OUTPUT_DIR/vorbis/"
 }
 
 create_fat_binary() {
@@ -225,19 +236,23 @@ create_fat_binary() {
     shift
     local -a archs=("$@")
 
-    local dest="$OUTPUT_DIR/$platform/fat"
-    mkdir -p "$dest/lib"
+    local dest="$OUTPUT_DIR/$platform"
+    mkdir -p "$dest"
 
     for lib in libogg.a libvorbis.a libvorbisfile.a libvorbisenc.a; do
+        if [ "$lib" = "libogg.a" ] && [ -f "$dest/$lib" ]; then
+            continue
+        fi
         local lib_paths=()
         for arch in "${archs[@]}"; do
-            lib_paths+=("$OUTPUT_DIR/$platform/$arch/lib/$lib")
+            lib_paths+=("$ARCH_LIBS_DIR/$platform/$arch/$lib")
         done
-        lipo -create "${lib_paths[@]}" -output "$dest/lib/$lib"
+        if [ "${#lib_paths[@]}" -eq 1 ]; then
+            cp "${lib_paths[0]}" "$dest/$lib"
+        else
+            lipo -create "${lib_paths[@]}" -output "$dest/$lib"
+        fi
     done
-
-    # Copy headers from first arch
-    cp -R "$OUTPUT_DIR/$platform/${archs[0]}/include" "$dest/"
 }
 
 # ============================================================================
@@ -281,7 +296,7 @@ build_macos_arch() {
         --disable-examples \
         --disable-oggtest
 
-    copy_to_output "macos" "$arch" "$ogg_prefix" "$vorbis_prefix"
+    copy_to_output "macosx" "$arch" "$ogg_prefix" "$vorbis_prefix"
 }
 
 build_ios() {
@@ -326,7 +341,7 @@ build_ios() {
         --disable-examples \
         --disable-oggtest
 
-    copy_to_output "ios" "${sdk}-${arch}" "$ogg_prefix" "$vorbis_prefix"
+    copy_to_output "$sdk" "$arch" "$ogg_prefix" "$vorbis_prefix"
 }
 
 build_catalyst() {
@@ -371,7 +386,7 @@ build_catalyst() {
         --disable-examples \
         --disable-oggtest
 
-    copy_to_output "catalyst" "$arch" "$ogg_prefix" "$vorbis_prefix"
+    copy_to_output "macosx" "$arch" "$ogg_prefix" "$vorbis_prefix"
 }
 
 build_android_abi() {
@@ -466,22 +481,19 @@ patch_source_tree_libtool "$OGG_DIR"
 patch_source_tree_libtool "$VORBIS_DIR"
 
 # Create output directory
-mkdir -p "$OUTPUT_DIR"
-
-# Build macOS (arm64 and x86_64)
-build_macos_arch arm64
-build_macos_arch x86_64
-create_fat_binary "macos" "arm64" "x86_64"
+mkdir -p "$OUTPUT_DIR" "$INCLUDE_OUTPUT_DIR"
 
 # Build iOS (device and simulator)
 build_ios iphoneos arm64 aarch64-apple-darwin
 build_ios iphonesimulator arm64 aarch64-apple-darwin
 build_ios iphonesimulator x86_64 x86_64-apple-darwin
+create_fat_binary "iphoneos" "arm64"
+create_fat_binary "iphonesimulator" "arm64" "x86_64"
 
 # Build Mac Catalyst (arm64 and x86_64)
 build_catalyst arm64 aarch64-apple-darwin
 build_catalyst x86_64 x86_64-apple-darwin
-create_fat_binary "catalyst" "arm64" "x86_64"
+create_fat_binary "macosx" "arm64" "x86_64"
 
 # Build Android (4 ABIs)
 build_android_abi arm64-v8a   aarch64-linux-android      "aarch64-linux-android${ANDROID_API}"
@@ -494,8 +506,9 @@ echo "============================================"
 echo "Done building libvorbis v$VORBIS_VERSION (with libogg v$OGG_VERSION)"
 echo "============================================"
 echo "Artifacts are in: $OUTPUT_DIR"
-echo "  macOS:    $OUTPUT_DIR/macos/{arm64,x86_64,fat}/lib/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a"
-echo "  iOS:      $OUTPUT_DIR/ios/{iphoneos-arm64,iphonesimulator-arm64,iphonesimulator-x86_64}/lib/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a"
-echo "  Catalyst: $OUTPUT_DIR/catalyst/{arm64,x86_64,fat}/lib/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a"
-echo "  Android:  $OUTPUT_DIR/android/{arm64-v8a,armeabi-v7a,x86_64,x86}/lib/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a"
+echo "  Headers:  $INCLUDE_OUTPUT_DIR/{ogg,vorbis}"
+echo "  iPhoneOS: $OUTPUT_DIR/iphoneos/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a"
+echo "  iOS Sim:  $OUTPUT_DIR/iphonesimulator/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a"
+echo "  macOSX:   $OUTPUT_DIR/macosx/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a"
+echo "  Android:  $OUTPUT_DIR/android/{arm64-v8a,armeabi-v7a,x86_64,x86}/{libogg,libvorbis,libvorbisfile,libvorbisenc}.a"
 echo "============================================"
