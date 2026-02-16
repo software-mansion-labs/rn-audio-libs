@@ -82,6 +82,31 @@ create_framework() {
 
 ffmpeg_libs="libavcodec libavformat libavutil libswresample"
 
+# Creates a set of XCFrameworks for a named variant from one or more framework roots.
+create_xcframework_variant() {
+    local variant_name="$1"
+    shift
+    local framework_roots=("$@")
+    local variant_output_dir="outputs/ffmpeg/${variant_name}"
+
+    mkdir -p "${variant_output_dir}"
+
+    for name in $ffmpeg_libs; do
+        rm -rf "${variant_output_dir}/${name}.xcframework"
+
+        local create_cmd=(xcodebuild -create-xcframework)
+        local framework_root
+        for framework_root in "${framework_roots[@]}"; do
+            create_cmd+=(-framework "${framework_root}/${name}.framework")
+        done
+        create_cmd+=(-output "${variant_output_dir}/${name}.xcframework")
+
+        "${create_cmd[@]}"
+    done
+
+    echo "${variant_name} XCFrameworks created!"
+}
+
 # ============================================================================
 # iOS frameworks
 # ============================================================================
@@ -91,35 +116,10 @@ for name in $ffmpeg_libs; do
     create_framework $name outputs/ffmpeg/ios/iphonesimulator
 done
 
-# Create iOS XCFrameworks:
-IOS_OUTPUT_DIR="outputs/ffmpeg/ios"
-
-rm -rf "${IOS_OUTPUT_DIR}/libavcodec.xcframework"
-rm -rf "${IOS_OUTPUT_DIR}/libavformat.xcframework"
-rm -rf "${IOS_OUTPUT_DIR}/libavutil.xcframework"
-rm -rf "${IOS_OUTPUT_DIR}/libswresample.xcframework"
-
-xcodebuild -create-xcframework \
-    -framework "${IOS_OUTPUT_DIR}/iphoneos/framework/libavcodec.framework" \
-    -framework "${IOS_OUTPUT_DIR}/iphonesimulator/framework/libavcodec.framework" \
-    -output "${IOS_OUTPUT_DIR}/libavcodec.xcframework"
-
-xcodebuild -create-xcframework \
-    -framework "${IOS_OUTPUT_DIR}/iphoneos/framework/libavformat.framework" \
-    -framework "${IOS_OUTPUT_DIR}/iphonesimulator/framework/libavformat.framework" \
-    -output "${IOS_OUTPUT_DIR}/libavformat.xcframework"
-
-xcodebuild -create-xcframework \
-    -framework "${IOS_OUTPUT_DIR}/iphoneos/framework/libavutil.framework" \
-    -framework "${IOS_OUTPUT_DIR}/iphonesimulator/framework/libavutil.framework" \
-    -output "${IOS_OUTPUT_DIR}/libavutil.xcframework"
-
-xcodebuild -create-xcframework \
-    -framework "${IOS_OUTPUT_DIR}/iphoneos/framework/libswresample.framework" \
-    -framework "${IOS_OUTPUT_DIR}/iphonesimulator/framework/libswresample.framework" \
-    -output "${IOS_OUTPUT_DIR}/libswresample.xcframework"
-
-echo "iOS XCFrameworks created!"
+echo "Creating iOS-only XCFrameworks..."
+create_xcframework_variant "ios_only" \
+    "outputs/ffmpeg/ios/iphoneos/framework" \
+    "outputs/ffmpeg/ios/iphonesimulator/framework"
 
 # ============================================================================
 # macOS frameworks
@@ -168,37 +168,16 @@ if [ -d "outputs/ffmpeg/catalyst/fat/lib" ]; then
         create_framework $name outputs/ffmpeg/catalyst/fat
     done
 
-    # Create Catalyst XCFrameworks:
-    CATALYST_OUTPUT_DIR="outputs/ffmpeg/catalyst"
-
-    rm -rf "${CATALYST_OUTPUT_DIR}/libavcodec.xcframework"
-    rm -rf "${CATALYST_OUTPUT_DIR}/libavformat.xcframework"
-    rm -rf "${CATALYST_OUTPUT_DIR}/libavutil.xcframework"
-    rm -rf "${CATALYST_OUTPUT_DIR}/libswresample.xcframework"
-
-    xcodebuild -create-xcframework \
-        -framework "${CATALYST_OUTPUT_DIR}/fat/framework/libavcodec.framework" \
-        -output "${CATALYST_OUTPUT_DIR}/libavcodec.xcframework"
-
-    xcodebuild -create-xcframework \
-        -framework "${CATALYST_OUTPUT_DIR}/fat/framework/libavformat.framework" \
-        -output "${CATALYST_OUTPUT_DIR}/libavformat.xcframework"
-
-    xcodebuild -create-xcframework \
-        -framework "${CATALYST_OUTPUT_DIR}/fat/framework/libavutil.framework" \
-        -output "${CATALYST_OUTPUT_DIR}/libavutil.xcframework"
-
-    xcodebuild -create-xcframework \
-        -framework "${CATALYST_OUTPUT_DIR}/fat/framework/libswresample.framework" \
-        -output "${CATALYST_OUTPUT_DIR}/libswresample.xcframework"
-
-    echo "Mac Catalyst XCFrameworks created!"
+    echo "Creating iOS + Catalyst XCFrameworks..."
+    create_xcframework_variant "ios_with_catalyst" \
+        "outputs/ffmpeg/ios/iphoneos/framework" \
+        "outputs/ffmpeg/ios/iphonesimulator/framework" \
+        "outputs/ffmpeg/catalyst/fat/framework"
 else
-    echo "Skipping Mac Catalyst frameworks (outputs/ffmpeg/catalyst/fat/lib not found)"
+    echo "Skipping iOS + Catalyst XCFrameworks (outputs/ffmpeg/catalyst/fat/lib not found)"
 fi
 
 echo "All XCFrameworks created!"
-
 
 
 
