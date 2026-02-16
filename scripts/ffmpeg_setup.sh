@@ -83,8 +83,6 @@ COMMON_CONFIG="
 --disable-devices
 --disable-filters
 --disable-static
---enable-shared
---enable-small
 --disable-debug
 --disable-optimizations
 --disable-everything
@@ -93,6 +91,11 @@ COMMON_CONFIG="
 --disable-hwaccels
 --disable-x86asm
 --disable-inline-asm
+--disable-xlib
+--disable-libxcb
+--disable-sdl2
+--enable-shared
+--enable-small
 --enable-protocol=https,tls,tcp,http,udp,file
 --enable-demuxer=hls,mov,mp3
 --enable-parser=aac
