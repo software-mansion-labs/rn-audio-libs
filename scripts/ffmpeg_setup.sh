@@ -12,7 +12,7 @@ BUILD_DIR="$ROOT_DIR/build/intermediate/ffmpeg"
 OUTPUT_DIR="$BUILD_DIR/output"
 FFMPEG_INCLUDE_OUTPUT_DIR="$ROOT_DIR/outputs/include_ffmpeg"
 FFMPEG_IOS_OUTPUT_DIR="$ROOT_DIR/outputs/ffmpeg_ios"
-FFMPEG_ANDROID_OUTPUT_DIR="$ROOT_DIR/outputs/ffmpeg_android"
+FFMPEG_ANDROID_OUTPUT_DIR="$ROOT_DIR/outputs/jniLibs"
 SHARED_INCLUDE_OUTPUT_DIR="$ROOT_DIR/outputs/include"
 
 # Read FFmpeg version from configs.json

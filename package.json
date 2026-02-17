@@ -9,6 +9,7 @@
     "build:opus": "./scripts/bundle_opus.sh",
     "build:vorbis": "./scripts/bundle_vorbis.sh",
     "build:ffmpeg": "./scripts/ffmpeg_setup.sh",
+    "pack": "bash ./scripts/pack_outputs.sh",
     "clean": "rm -rf outputs/* sources/* build/* 2>/dev/null || true"
   }
 }
