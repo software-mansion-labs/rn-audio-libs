@@ -13,6 +13,7 @@ OUTPUT_DIR="$BUILD_DIR/output"
 FFMPEG_INCLUDE_OUTPUT_DIR="$ROOT_DIR/outputs/include_ffmpeg"
 FFMPEG_IOS_OUTPUT_DIR="$ROOT_DIR/outputs/ffmpeg_ios"
 FFMPEG_ANDROID_OUTPUT_DIR="$ROOT_DIR/outputs/ffmpeg_android"
+SHARED_INCLUDE_OUTPUT_DIR="$ROOT_DIR/outputs/include"
 
 # Read FFmpeg version from configs.json
 CONFIG_FILE="$ROOT_DIR/configs.json"
@@ -37,6 +38,7 @@ mkdir -p "${OUTPUT_DIR}"
 mkdir -p "${FFMPEG_INCLUDE_OUTPUT_DIR}"
 mkdir -p "${FFMPEG_IOS_OUTPUT_DIR}"
 mkdir -p "${FFMPEG_ANDROID_OUTPUT_DIR}"
+mkdir -p "${SHARED_INCLUDE_OUTPUT_DIR}"
 
 AVUTIL_VERSION="60.8.100"
 AVCODEC_VERSION="62.11.100"
@@ -242,6 +244,59 @@ sync_ffmpeg_android_libs() {
         rm -rf "${dest_lib_dir}"
         mkdir -p "${dest_lib_dir}"
         cp -R "${src_lib_dir}/." "${dest_lib_dir}/"
+    done
+}
+
+sync_openssl_dependency_outputs() {
+    local shared_include_src="${OPENSSL_PREBUILT_FOLDER}/include-iphoneos"
+    if [ ! -d "${shared_include_src}" ]; then
+        shared_include_src="$(find "${OPENSSL_PREBUILT_FOLDER}" -maxdepth 1 -type d -name 'include-*' | head -n 1)"
+    fi
+    if [ -z "${shared_include_src}" ] || [ ! -d "${shared_include_src}" ]; then
+        shared_include_src="${OPENSSL_PREBUILT_FOLDER}/include"
+    fi
+    if [ -z "${shared_include_src}" ] || [ ! -d "${shared_include_src}" ]; then
+        echo "Error: OpenSSL include directory not found under ${OPENSSL_PREBUILT_FOLDER}"
+        exit 1
+    fi
+
+    # Export only public OpenSSL headers. Internal "crypto/*.h" contains
+    # names like crypto/ctype.h that can shadow libc++ headers when include
+    # paths are recursive.
+    rm -rf "${SHARED_INCLUDE_OUTPUT_DIR}/crypto"
+    mkdir -p "${SHARED_INCLUDE_OUTPUT_DIR}/openssl"
+    cp -R "${shared_include_src}/openssl/." "${SHARED_INCLUDE_OUTPUT_DIR}/openssl/"
+
+    mkdir -p "${ROOT_DIR}/outputs/iphoneos" "${ROOT_DIR}/outputs/iphonesimulator" "${ROOT_DIR}/outputs/macosx"
+
+    cp "${OPENSSL_PREBUILT_FOLDER}/iphoneos/libcrypto.a" "${ROOT_DIR}/outputs/iphoneos/libcrypto.a"
+    cp "${OPENSSL_PREBUILT_FOLDER}/iphoneos/libssl.a" "${ROOT_DIR}/outputs/iphoneos/libssl.a"
+
+    lipo -create \
+        "${OPENSSL_PREBUILT_FOLDER}/iphonesimulator/libcrypto.a" \
+        "${OPENSSL_PREBUILT_FOLDER}/iphonesimulator-x86_64/libcrypto.a" \
+        -output "${ROOT_DIR}/outputs/iphonesimulator/libcrypto.a"
+    lipo -create \
+        "${OPENSSL_PREBUILT_FOLDER}/iphonesimulator/libssl.a" \
+        "${OPENSSL_PREBUILT_FOLDER}/iphonesimulator-x86_64/libssl.a" \
+        -output "${ROOT_DIR}/outputs/iphonesimulator/libssl.a"
+
+    lipo -create \
+        "${OPENSSL_PREBUILT_FOLDER}/catalyst-arm64/libcrypto.a" \
+        "${OPENSSL_PREBUILT_FOLDER}/catalyst-x86_64/libcrypto.a" \
+        -output "${ROOT_DIR}/outputs/macosx/libcrypto.a"
+    lipo -create \
+        "${OPENSSL_PREBUILT_FOLDER}/catalyst-arm64/libssl.a" \
+        "${OPENSSL_PREBUILT_FOLDER}/catalyst-x86_64/libssl.a" \
+        -output "${ROOT_DIR}/outputs/macosx/libssl.a"
+
+    local abi
+    for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+        if [ -f "${OPENSSL_PREBUILT_FOLDER}/${abi}/libcrypto.a" ] && [ -f "${OPENSSL_PREBUILT_FOLDER}/${abi}/libssl.a" ]; then
+            mkdir -p "${ROOT_DIR}/outputs/android/${abi}"
+            cp "${OPENSSL_PREBUILT_FOLDER}/${abi}/libcrypto.a" "${ROOT_DIR}/outputs/android/${abi}/libcrypto.a"
+            cp "${OPENSSL_PREBUILT_FOLDER}/${abi}/libssl.a" "${ROOT_DIR}/outputs/android/${abi}/libssl.a"
+        fi
     done
 }
 
@@ -558,6 +613,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 
     echo "Mac Catalyst builds completed!"
 
+    sync_openssl_dependency_outputs
     sync_ffmpeg_headers
 
     # Create iOS XCFrameworks (ios + simulator + catalyst) in outputs/ffmpeg_ios.

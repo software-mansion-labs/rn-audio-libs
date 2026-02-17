@@ -355,8 +355,15 @@ build_ios() {
     export AR="$(xcrun --sdk "$sdk" --find ar)"
     export RANLIB="$(xcrun --sdk "$sdk" --find ranlib)"
 
-    export CFLAGS="-O3 -fPIC -arch $arch -isysroot $sdkroot -miphoneos-version-min=$IOS_MIN_VERSION"
-    export LDFLAGS="-arch $arch -isysroot $sdkroot -miphoneos-version-min=$IOS_MIN_VERSION"
+    local deployment_flag
+    if [[ "$sdk" == "iphonesimulator" ]]; then
+        deployment_flag="-mios-simulator-version-min=$IOS_MIN_VERSION"
+    else
+        deployment_flag="-miphoneos-version-min=$IOS_MIN_VERSION"
+    fi
+
+    export CFLAGS="-O3 -fPIC -arch $arch -isysroot $sdkroot $deployment_flag"
+    export LDFLAGS="-arch $arch -isysroot $sdkroot $deployment_flag"
 
     local ogg_build_dir="$BUILD_DIR/ios/${sdk}-${arch}/ogg"
     local ogg_prefix="$ogg_build_dir/install"
