@@ -12,6 +12,7 @@ if [ ! -d "$OUTPUTS_DIR" ]; then
 fi
 
 mkdir -p "$EXPORT_DIR"
+rm -f "$EXPORT_DIR/*.zip"
 
 if ! command -v zip >/dev/null 2>&1; then
     echo "Error: zip command is required"
@@ -23,9 +24,14 @@ packed_any=false
 
 for dir in "$OUTPUTS_DIR"/*; do
     [ -d "$dir" ] || continue
-    packed_any=true
 
     name="$(basename "$dir")"
+
+    if [[ "$name" == "include" || "$name" == "include_ffmpeg" ]]; then
+        continue
+    fi
+
+    packed_any=true
     archive_path="$EXPORT_DIR/${name}.zip"
 
     rm -f "$archive_path"
