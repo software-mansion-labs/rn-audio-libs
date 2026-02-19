@@ -221,6 +221,20 @@ sync_ffmpeg_headers() {
     cp -R "${src_include_dir}/." "${FFMPEG_INCLUDE_OUTPUT_DIR}/"
 }
 
+postprocess_ffmpeg_headers() {
+    if [ ! -d "${FFMPEG_INCLUDE_OUTPUT_DIR}" ]; then
+        echo "Skipping FFmpeg header post-processing (${FFMPEG_INCLUDE_OUTPUT_DIR} not found)"
+        return
+    fi
+
+    rm -f "${FFMPEG_INCLUDE_OUTPUT_DIR}/libavutil/time.h"
+
+    local file
+    while IFS= read -r file; do
+        perl -pi -e 's/AVMediaType/AVMediaTypeFFmpeg/g' "$file"
+    done < <(grep -rl -- "AVMediaType" "${FFMPEG_INCLUDE_OUTPUT_DIR}" || true)
+}
+
 sync_ffmpeg_android_libs() {
     local src_root="${OUTPUT_DIR}/android"
     if [ ! -d "${src_root}" ]; then
@@ -678,5 +692,7 @@ if [ -n "$ANDROID_NDK_ROOT" ] || [ -n "$NDK_ROOT" ]; then
 else
     echo "Skipping Android builds (ANDROID_NDK_ROOT or NDK_ROOT not set)"
 fi
+
+postprocess_ffmpeg_headers
 
 echo "All FFmpeg builds completed!"
