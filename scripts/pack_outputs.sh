@@ -12,7 +12,7 @@ if [ ! -d "$OUTPUTS_DIR" ]; then
 fi
 
 mkdir -p "$EXPORT_DIR"
-rm -f "$EXPORT_DIR/*.zip"
+rm -f "$EXPORT_DIR"/*.zip
 
 if ! command -v zip >/dev/null 2>&1; then
     echo "Error: zip command is required"
@@ -27,7 +27,10 @@ for dir in "$OUTPUTS_DIR"/*; do
 
     name="$(basename "$dir")"
 
-    if [[ "$name" == "include" || "$name" == "include_ffmpeg" ]]; then
+    # The Ogg/Opus/Vorbis headers stay tracked in react-native-audio-api. The FFmpeg
+    # headers are not: download-prebuilt-binaries.sh fetches include_ffmpeg.zip there
+    # whenever FFmpeg is enabled, so it has to ship as a release asset.
+    if [[ "$name" == "include" ]]; then
         continue
     fi
 

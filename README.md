@@ -80,4 +80,29 @@ yarn export
 ```
 
 This creates `export/*.zip`, one archive per top-level directory in `outputs/`,
-excluding `include` and `include_ffmpeg`.
+excluding `include` (those Ogg/Opus/Vorbis headers are tracked in
+`react-native-audio-api`).
+
+For iOS, also run:
+
+```bash
+bash scripts/pack_spm_xcframeworks.sh
+```
+
+This creates `export/spm/<name>.xcframework.zip`, one per library, plus
+`checksums.txt`. CocoaPods and Swift Package Manager both consume these.
+
+A release needs these archives attached as assets, because
+`react-native-audio-api` pins the tag (`download-prebuilt-binaries.sh` and
+`Package.swift`) and fails on a missing one:
+
+- `android.zip`: Android static libs
+- `libopus`, `libopusfile`, `libogg`, `libvorbis`, `libvorbisenc`,
+  `libvorbisfile` `.xcframework.zip`: iOS static libs
+- `jniLibs.zip`, `include_ffmpeg.zip`, and `libavcodec`, `libavformat`,
+  `libavutil`, `libswresample`, `FFmpegHeaders` `.xcframework.zip`: FFmpeg,
+  only fetched when FFmpeg is enabled
+
+Repacking changes every checksum, and Swift Package Manager rejects an asset
+whose checksum changed under the same URL, so publish rebuilt archives under a
+new tag. Copy the new `checksums.txt` values into `Package.swift`.
