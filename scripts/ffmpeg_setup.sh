@@ -105,9 +105,9 @@ COMMON_CONFIG="
 --enable-shared
 --enable-small
 --enable-protocol=https,tls,tcp,http,udp,file
---enable-demuxer=hls,mov,mp3
+--enable-demuxer=hls,mov,mp3,flac,caf
 --enable-parser=aac
---enable-decoder=aac,mp3,flac,alac
+--enable-decoder=aac,mp3,flac,alac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f32be,pcm_s16be
 --enable-encoder=aac,mp3,flac,pcm_s16le
 --enable-muxer=wav,mp4,flac,caf
 --enable-pic
