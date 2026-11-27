@@ -90,11 +90,8 @@ jobs:
           path: .conan2/p
           key: conan-${{ runner.os }}-${{ runner.arch }}-xcode-${{ env.XCODE_BUILD }}-ndk-${{ env.NDK_VERSION }}-${{ hashFiles('conan.lock', 'conanfile.py', 'conan/**', 'requirements.txt') }}
 
-      - name: Build Ogg, Opus, Vorbis and OpenSSL (Conan)
+      - name: Build Ogg, Opus, Vorbis, OpenSSL and FFmpeg (Conan)
         run: yarn build:conan
-
-      - name: Build FFmpeg
-        run: yarn build:ffmpeg
 
       - name: Pack
         run: yarn export

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Checks the built libraries before they are packed or released; exits non-zero on any mismatch.
 #   - Apple: lipo architectures per SDK, and vtool's LC_BUILD_VERSION (platform, minos) for every
-#     object of every slice in outputs/{iphoneos,iphonesimulator,macosx} and openssl-prebuilt/
-#   - Android: llvm-readelf ELF class/machine for every object in outputs/android/<abi> and
-#     openssl-prebuilt/<abi>
-#   - nm: each library defines its entry points (opus_decode, op_open_callbacks, ...)
+#     object of every slice in outputs/{iphoneos,iphonesimulator,macosx} and for every slice of
+#     the FFmpeg frameworks in outputs/ffmpeg_ios
+#   - Android: llvm-readelf ELF class/machine for every object in outputs/android/<abi> and for
+#     the FFmpeg .so files in outputs/jniLibs/<abi> (plus their 16 KB segment alignment)
+#   - nm: each library defines its entry points (opus_decode, avformat_open_input, ...)
+#   - FFmpeg links only system libraries and its own; OpenSSL (configs.json version) is inside
 #   - --release: export/ holds exactly the release assets, with the archive layout
 #     react-native-audio-api downloads, and checksums.txt matches them
 #
@@ -16,10 +18,9 @@ cd "$ROOT_DIR"
 source scripts/conan_profiles.sh
 
 IOS_MIN_VERSION="15.1"
-MACOS_MIN_VERSION="11.0"
 OUTPUT_DIR="outputs"
-OPENSSL_PREBUILT_DIR="build/intermediate/openssl-prebuilt"
 EXPORT_DIR="export"
+OPENSSL_VERSION="$(python3 -c "import json; print(json.load(open('configs.json'))['openssl']['version'])")"
 
 XIPH_LIBS=(libogg libopus libopusfile libvorbis libvorbisenc libvorbisfile)
 ANDROID_ABIS=(arm64-v8a armeabi-v7a x86 x86_64)
@@ -58,9 +59,61 @@ entry_symbol() {
         libvorbis) echo vorbis_info_init ;;
         libvorbisenc) echo vorbis_encode_init ;;
         libvorbisfile) echo ov_open_callbacks ;;
-        libcrypto) echo EVP_EncryptInit_ex ;;
-        libssl) echo SSL_CTX_new ;;
+        libavcodec) echo avcodec_open2 ;;
+        libavformat) echo avformat_open_input ;;
+        libavutil) echo av_malloc ;;
+        libswresample) echo swr_init ;;
     esac
+}
+
+# FFmpeg's OpenSSL is linked in statically; its version string proves which one.
+check_openssl_inside() {
+    local binary="$1"
+    local strings_out
+    strings_out="$(strings "$binary" 2>/dev/null)"
+    grep -q "OpenSSL $OPENSSL_VERSION " <<<"$strings_out" || fail "$binary does not contain OpenSSL $OPENSSL_VERSION"
+}
+
+# check_apple_dylib <binary> <arch> <platform> <minos>: one slice of an FFmpeg framework.
+check_apple_dylib() {
+    local binary="$1" arch="$2" platform="$3" minos="$4"
+    local lib
+    lib="$(basename "$binary")"
+    if [ ! -f "$binary" ]; then
+        fail "$binary missing"
+        return
+    fi
+    if ! lipo "$binary" -verify_arch "$arch"; then
+        fail "$binary has no $arch slice ($(lipo -archs "$binary"))"
+        return
+    fi
+    local build deps symbols
+    build="$(vtool -arch "$arch" -show-build "$binary")"
+    if ! grep -q "platform $platform\$" <<<"$build" || ! grep -q "minos $minos\$" <<<"$build"; then
+        fail "$binary ($arch): expected $platform minos $minos, got: $(grep -E 'platform|minos' <<<"$build" | tr -s ' \n' ' ')"
+    fi
+    # Only the system and the other FFmpeg frameworks: OpenSSL and zlib are linked in.
+    deps="$(otool -arch "$arch" -L "$binary" | tail -n +2 | awk '{print $1}' | grep -vE '^(/usr/lib/|/System/Library/|@rpath/lib(avcodec|avformat|avutil|swresample)\.framework/)' || true)"
+    [ -z "$deps" ] || fail "$binary ($arch) links unexpected libraries: $(echo $deps)"
+    symbols="$(nm -g --defined-only -arch "$arch" "$binary" 2>/dev/null)"
+    grep -qw "_$(entry_symbol "$lib")" <<<"$symbols" || fail "$binary ($arch) does not define $(entry_symbol "$lib")"
+}
+
+# check_android_so <binary> <abi>: one FFmpeg .so.
+check_android_so() {
+    local binary="$1" abi="$2"
+    local lib
+    lib="$(basename "$binary" .so)"
+    if [ ! -f "$binary" ]; then
+        fail "$binary missing"
+        return
+    fi
+    check_android "$binary" "$abi" "$lib"
+    local alignments needed
+    alignments="$("$LLVM_BIN/llvm-readelf" -l "$binary" | awk '/LOAD/{print $NF}' | sort -u | tr '\n' ' ')"
+    [ "$alignments" = "0x4000 " ] || fail "$binary: LOAD segments aligned $alignments, expected 0x4000 (16 KB pages)"
+    needed="$("$LLVM_BIN/llvm-readelf" -d "$binary" | sed -nE 's/.*\(NEEDED\).*\[(.*)\]/\1/p' | grep -vxE 'lib(avcodec|avformat|avutil|swresample|c|m|dl|log)\.so' || true)"
+    [ -z "$needed" ] || fail "$binary links unexpected libraries: $(echo $needed)"
 }
 
 # Extracts the objects of one architecture of <archive> into a fresh folder and prints its path.
@@ -104,11 +157,10 @@ check_apple() {
     fi
 }
 
-# check_android <archive> <abi>
+# check_android <archive or .so> <abi> [library name]
 check_android() {
     local archive="$1" abi="$2"
-    local lib
-    lib="$(basename "$archive" .a)"
+    local lib="${3:-$(basename "$archive" .a)}"
     local class machine
     case "$abi" in
         arm64-v8a) class=ELF64 machine="AArch64" ;;
@@ -120,14 +172,19 @@ check_android() {
         fail "$archive missing"
         return
     fi
-    local headers
+    local headers sections
     headers="$("$LLVM_BIN/llvm-readelf" -h "$archive")"
+    sections="$("$LLVM_BIN/llvm-readelf" -S "$archive")"
+    grep -q '\.debug_' <<<"$sections" && fail "$archive: carries debug info (conan_build.sh strips it)"
     if grep -E '^ *(Class|Machine):' <<<"$headers" | sed -E 's/^ *(Class|Machine): *//' | sort -u \
         | grep -vqxE "$class|$machine"; then
         fail "$archive: expected $class $machine, found $(grep -E '^ *(Class|Machine):' <<<"$headers" | sed -E 's/^ *(Class|Machine): *//' | sort -u | tr '\n' ',')"
     fi
     local symbols
-    symbols="$("$LLVM_BIN/llvm-nm" -g --defined-only "$archive" 2>/dev/null)"
+    # A shared library's exported symbols are its dynamic ones (the static table may be stripped).
+    local nm_scope=-g
+    [[ "$archive" == *.so ]] && nm_scope=-D
+    symbols="$("$LLVM_BIN/llvm-nm" "$nm_scope" --defined-only "$archive" 2>/dev/null)"
     if ! grep -qw "$(entry_symbol "$lib")" <<<"$symbols"; then
         fail "$archive does not define $(entry_symbol "$lib")"
     fi
@@ -150,36 +207,33 @@ for profile in "${profiles[@]}"; do
             for lib in "${XIPH_LIBS[@]}"; do
                 check_android "$OUTPUT_DIR/android/$abi/$lib.a" "$abi"
             done
-            for lib in libcrypto libssl; do
-                check_android "$OPENSSL_PREBUILT_DIR/$abi/$lib.a" "$abi"
+            for lib in "${FFMPEG_FRAMEWORKS[@]}"; do
+                check_android_so "$OUTPUT_DIR/jniLibs/$abi/$lib.so" "$abi"
             done
+            check_openssl_inside "$OUTPUT_DIR/jniLibs/$abi/libavformat.so"
             continue
             ;;
     esac
 
     arch="${profile##*-}"
+    # sdk: the outputs/ folder of the static libs; slice: the FFmpeg xcframework slice's suffix.
     case "$profile" in
-        iphoneos-*) sdk=iphoneos platform=IOS minos="$IOS_MIN_VERSION" variant=iphoneos ;;
-        iphonesimulator-*) sdk=iphonesimulator platform=IOSSIMULATOR minos="$IOS_MIN_VERSION" variant="$profile" ;;
-        catalyst-*) sdk=macosx platform=MACCATALYST minos="$IOS_MIN_VERSION" variant="$profile" ;;
-        macos-*) sdk="" platform=MACOS minos="$MACOS_MIN_VERSION" variant="$profile" ;;
+        iphoneos-*) sdk=iphoneos platform=IOS slice="" ;;
+        iphonesimulator-*) sdk=iphonesimulator platform=IOSSIMULATOR slice="-simulator" ;;
+        catalyst-*) sdk=macosx platform=MACCATALYST slice="-maccatalyst" ;;
         *) fail "unknown profile $profile"; continue ;;
     esac
-    [ "$profile" = iphonesimulator-arm64 ] && variant=iphonesimulator
 
-    # macOS slices exist only for FFmpeg's macOS build: OpenSSL, no Ogg/Opus/Vorbis.
-    if [ -n "$sdk" ]; then
-        eval "expected_$sdk+=(\"$arch\")"
-        for lib in "${XIPH_LIBS[@]}"; do
-            check_apple "$OUTPUT_DIR/$sdk/$lib.a" "$arch" "$platform" "$minos"
-        done
-    fi
-    for lib in libcrypto libssl; do
-        archive="$OPENSSL_PREBUILT_DIR/$variant/$lib.a"
-        check_apple "$archive" "$arch" "$platform" "$minos"
-        if [ -f "$archive" ] && [ "$(lipo -archs "$archive")" != "$arch" ]; then
-            fail "$archive: expected only $arch, found $(lipo -archs "$archive")"
-        fi
+    eval "expected_$sdk+=(\"$arch\")"
+    for lib in "${XIPH_LIBS[@]}"; do
+        check_apple "$OUTPUT_DIR/$sdk/$lib.a" "$arch" "$platform" "$IOS_MIN_VERSION"
+    done
+    for lib in "${FFMPEG_FRAMEWORKS[@]}"; do
+        slice_dirs=("$OUTPUT_DIR/ffmpeg_ios/$lib.xcframework"/ios-*"$slice")
+        [ "$slice" = "" ] && slice_dirs=("$OUTPUT_DIR/ffmpeg_ios/$lib.xcframework"/ios-arm64)
+        # Catalyst frameworks use the versioned bundle layout; <lib> links to Versions/A/<lib>.
+        check_apple_dylib "${slice_dirs[0]}/$lib.framework/$lib" "$arch" "$platform" "$IOS_MIN_VERSION"
+        [ "$lib" = libavformat ] && check_openssl_inside "${slice_dirs[0]}/$lib.framework/$lib"
     done
 done
 
@@ -235,7 +289,7 @@ if [ "$release" = true ]; then
     done
     # Android's FFmpeg download is jniLibs.zip + include_ffmpeg.zip; the headers carry the
     # licenses (jniLibs/ is Gradle's native-library folder).
-    for package in ffmpeg openssl; do
+    for package in ffmpeg openssl zlib; do
         grep -q "^include_ffmpeg/licenses/$package/" <<<"$ffmpeg_header_files" || fail "include_ffmpeg.zip has no licenses/$package"
     done
 
@@ -254,7 +308,7 @@ if [ "$release" = true ]; then
             libogg) packages=ogg ;;
             libvorbis*) packages=vorbis ;;
             FFmpegHeaders) packages=ffmpeg ;;
-            *) packages="ffmpeg openssl" ;;
+            *) packages="ffmpeg openssl zlib" ;;
         esac
         xcf_files="$(zip_files "$EXPORT_DIR/spm/$name.xcframework.zip")"
         for package in $packages; do

@@ -31,8 +31,8 @@ license_packages() {
         libopus) echo opus ;;
         libogg) echo ogg ;;
         libvorbis*) echo vorbis ;;
-        # The FFmpeg frameworks link OpenSSL statically.
-        libav* | libswresample) echo ffmpeg openssl ;;
+        # The FFmpeg frameworks link OpenSSL and zlib statically.
+        libav* | libswresample) echo ffmpeg openssl zlib ;;
         "$FFMPEG_HEADERS_NAME") echo ffmpeg ;;
     esac
 }

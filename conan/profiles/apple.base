@@ -4,5 +4,11 @@ include(default)
 [conf]
 # The old autotools build compiled vorbis with these on Darwin; its CMake build adds none.
 vorbis/*:tools.build:cflags=["-ffast-math", "-fsigned-char"]
+# FFmpeg as the bash build configured it: size-optimized (-Oz), no debug info, ARM NEON
+# assembly kept but no x86 or inline assembly.
+ffmpeg/*:tools.gnu:extra_configure_args=["--enable-small", "--disable-debug", "--disable-x86asm", "--disable-inline-asm"]
+# FFmpeg's configure runs a bare `clang` unless told otherwise, which is whichever clang comes
+# first on PATH (e.g. Homebrew's LLVM). /usr/bin/clang is Xcode's, through xcode-select.
+ffmpeg/*:tools.build:compiler_executables={"c": "/usr/bin/clang", "cpp": "/usr/bin/clang++"}
 # Flags are part of the package ID, so changing them can't reuse a cached binary.
-tools.info.package_id:confs=["tools.build:cflags", "tools.build:sharedlinkflags", "tools.build:exelinkflags"]
+tools.info.package_id:confs=["tools.build:cflags", "tools.build:sharedlinkflags", "tools.build:exelinkflags", "tools.gnu:extra_configure_args", "tools.build:compiler_executables"]
