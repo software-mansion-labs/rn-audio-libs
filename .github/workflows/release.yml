@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "New release tag (vX.Y.Z). Must not exist yet: tags are never reused."
-        required: true
+        description: "Release tag. Empty: v<package.json version>. Also accepts a pre-release of it (v5.0.0-rc.1). Tags are never reused."
+        required: false
   push:
     tags: ["v*"]
 
@@ -17,14 +17,13 @@ permissions:
   attestations: write
 
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: release-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
 env:
   # Bump here and in the README requirements; the cache key includes it. The NDK version is in
   # configs.json.
   XCODE_APP: /Applications/Xcode_26.6.app
-  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   release:
@@ -33,10 +32,22 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Check the tag is new
+      - name: Check the tag matches package.json and is new
         env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
+          VERSION="$(python3 -c "import json; print(json.load(open('package.json'))['version'])")"
+          if [ "${{ github.event_name }}" = push ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="${INPUT_TAG:-v$VERSION}"
+          fi
+          # package.json is the version being released: the tag is that version, or a
+          # pre-release of it (v5.0.0-rc.1). Bump package.json in a PR before releasing.
+          if [[ "$TAG" != "v$VERSION" && "$TAG" != "v$VERSION"-* ]]; then
+            echo "::error::Tag $TAG doesn't match package.json version $VERSION (expected v$VERSION or v$VERSION-<pre-release>)"; exit 1
+          fi
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
             echo "::error::$TAG is not a vX.Y.Z tag"; exit 1
           fi
@@ -47,6 +58,8 @@ jobs:
           if [ "${{ github.event_name }}" = workflow_dispatch ] && git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
             echo "::error::Tag $TAG already exists; pick a new tag"; exit 1
           fi
+          echo "TAG=$TAG" >>"$GITHUB_ENV"
+          echo "Releasing $TAG"
 
       - name: Select Xcode
         run: |

@@ -132,11 +132,15 @@ the same URL, so **a tag is never reused**: every rebuild gets a new tag.
 
 ### Releasing
 
-1. Run **Release** (`.github/workflows/release.yml`) with a new tag (`workflow_dispatch`), or
-   push a new `v*` tag. It builds everything, runs `yarn verify --release`, attests build
-   provenance for every asset and uploads them, with `checksums.txt`, to a **draft** release.
-   It refuses a tag that already has a release.
-2. Point react-native-audio-api at the draft:
+1. Set `version` in `package.json` to the release (e.g. `5.0.0`) in a PR and merge it. That
+   version is the release: the workflow only accepts the tag `v<version>` or a pre-release of
+   it (`v5.0.0-rc.1`).
+2. Run **Release** (`.github/workflows/release.yml`) from `main` (`workflow_dispatch`; leave the
+   tag empty for `v<version>`, or enter an rc tag), or push a matching `v*` tag. It builds
+   everything, runs `yarn verify --release`, attests build provenance for every asset and
+   uploads them, with `checksums.txt`, to a **draft** release. It refuses a tag that doesn't
+   match `package.json` or already has a release.
+3. Point react-native-audio-api at the draft:
 
    ```bash
    gh release download <tag> -R software-mansion-labs/rn-audio-libs -p checksums.txt
@@ -145,10 +149,10 @@ the same URL, so **a tag is never reused**: every rebuild gets a new tag.
 
    It rewrites `TAG` in `packages/react-native-audio-api/scripts/download-prebuilt-binaries.sh`,
    `prebuiltBinariesTag` and the binary-target checksums in `Package.swift`. Open the PR there.
-3. Draft assets can't be downloaded anonymously, so the downstream CI can't fetch them yet:
+4. Draft assets can't be downloaded anonymously, so the downstream CI can't fetch them yet:
    publish the draft as a **pre-release** (`gh release edit <tag> --draft=false --prerelease`)
    and rerun the downstream PR's CI. The assets are now final; never change them.
-4. Once the downstream PR is green, mark the release latest
+5. Once the downstream PR is green, mark the release latest
    (`gh release edit <tag> --prerelease=false --latest`) and merge the PR. If it fails, fix
    forward with a new tag; the pre-release stays as a record.
 
