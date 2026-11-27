@@ -6,12 +6,19 @@ and in Package.swift, and every SwiftPM binary-target checksum in Package.swift,
 release's checksums.txt ("<name> <sha256>" per line, written by pack_spm_xcframeworks.sh).
 
 Usage: scripts/bump_rn_audio_api.py <tag> <checksums.txt> <react-native-audio-api checkout>
+   or: yarn bump:rn-audio-api <tag> <checksums.txt> <react-native-audio-api checkout>
 """
+import os
 import re
 import sys
 from pathlib import Path
 
 PACKAGE = Path("packages/react-native-audio-api")
+
+
+def user_path(argument):
+    # yarn runs the script from the repo root; INIT_CWD is where the command was typed.
+    return Path(os.environ.get("INIT_CWD", os.getcwd())) / Path(argument).expanduser()
 
 
 def substitute(text, pattern, replacement, what):
@@ -24,7 +31,7 @@ def substitute(text, pattern, replacement, what):
 def main():
     if len(sys.argv) != 4:
         sys.exit(__doc__)
-    tag, checksums_path, checkout = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3])
+    tag, checksums_path, checkout = sys.argv[1], user_path(sys.argv[2]), user_path(sys.argv[3])
     if not re.fullmatch(r"v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?", tag):
         sys.exit(f"Error: {tag!r} is not a vX.Y.Z tag")
 

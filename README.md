@@ -144,7 +144,7 @@ the same URL, so **a tag is never reused**: every rebuild gets a new tag.
 
    ```bash
    gh release download <tag> -R software-mansion-labs/rn-audio-libs -p checksums.txt
-   scripts/bump_rn_audio_api.py <tag> checksums.txt ~/projects/react-native-audio-api
+   yarn bump:rn-audio-api <tag> checksums.txt ~/projects/react-native-audio-api
    ```
 
    It rewrites `TAG` in `packages/react-native-audio-api/scripts/download-prebuilt-binaries.sh`,
