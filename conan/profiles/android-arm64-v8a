@@ -1,4 +1,10 @@
 include(android.base)
+{% set bin = (os.getenv("ANDROID_NDK_ROOT") or os.getenv("ANDROID_NDK")) ~ "/toolchains/llvm/prebuilt/darwin-x86_64/bin/" %}
 
 [settings]
 arch=armv8
+
+[conf]
+# FFmpeg's configure ignores the CC that Conan's Android toolchain sets, so name the NDK's clang
+# wrapper for this ABI and API level (os.api_level in android.base) explicitly.
+ffmpeg/*:tools.build:compiler_executables={"c": "{{ bin }}aarch64-linux-android24-clang", "cpp": "{{ bin }}aarch64-linux-android24-clang++"}

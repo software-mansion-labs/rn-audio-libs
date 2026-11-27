@@ -18,5 +18,11 @@ tools.build:exelinkflags=["-Wl,-z,max-page-size=16384", "-Wl,-z,common-page-size
 # The old autotools build compiled vorbis with -fsigned-char (char is unsigned on Android ARM);
 # its CMake build doesn't.
 vorbis/*:tools.build:cflags=["-fsigned-char"]
+# FFmpeg as the bash build configured it: size-optimized (-Oz), no debug info, ARM NEON
+# assembly kept but no x86 or inline assembly.
+ffmpeg/*:tools.gnu:extra_configure_args=["--enable-small", "--disable-debug", "--disable-x86asm", "--disable-inline-asm"]
+# FFmpeg's .so files bind their own symbols (-Bsymbolic), as the bash build linked them. A
+# package-specific value replaces the 16 KB flags above, so it repeats them.
+ffmpeg/*:tools.build:sharedlinkflags=["-Wl,-z,max-page-size=16384", "-Wl,-z,common-page-size=16384", "-Wl,-Bsymbolic"]
 # Flags are part of the package ID, so changing them can't reuse a cached binary.
-tools.info.package_id:confs=["tools.build:cflags", "tools.build:sharedlinkflags", "tools.build:exelinkflags"]
+tools.info.package_id:confs=["tools.build:cflags", "tools.build:sharedlinkflags", "tools.build:exelinkflags", "tools.gnu:extra_configure_args", "tools.build:compiler_executables"]

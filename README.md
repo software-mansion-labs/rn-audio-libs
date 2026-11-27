@@ -10,22 +10,23 @@ Library versions are configured in `configs.json`.
 
 ## Included Libraries
 
-- FFmpeg (LGPLv3): [lgplv3.txt](lgplv3.txt)
+- FFmpeg (LGPL 2.1 or later): [lgplv3.txt](lgplv3.txt)
 - OpenSSL (Apache-2.0): [apache2.txt](apache2.txt)
+- zlib (zlib license), linked into FFmpeg
 - LibOpus (BSD): [bsd3opus.txt](bsd3opus.txt)
 - LibOgg (BSD): [bsd3ogg.txt](bsd3ogg.txt)
 - LibVorbis (BSD): [bsd3ogg.txt](bsd3ogg.txt)
 
-Ogg, Opus, Opusfile, Vorbis and OpenSSL are built with [Conan 2](https://docs.conan.io) from
-the ConanCenter recipes. FFmpeg is built by `scripts/ffmpeg_setup.sh` and links the OpenSSL
-built by Conan. FFmpeg's configure reports its build as "LGPL version 2.1 or later".
+Every library is built with [Conan 2](https://docs.conan.io) from the ConanCenter recipes.
+FFmpeg is a set of shared libraries with OpenSSL and zlib linked in statically; its configure
+reports the build as "LGPL version 2.1 or later".
 
 License files ship with the binaries, under `licenses/<package>/`, taken from the sources being
 built (Conan packages, and FFmpeg's `LICENSE.md` and `COPYING.LGPL*`):
 
 - `android.zip`: ogg, opus, opusfile, vorbis, openssl
 - each Ogg/Opus/Vorbis xcframework: its own package
-- FFmpeg xcframeworks and `include_ffmpeg.zip`: ffmpeg and openssl (linked in statically);
+- FFmpeg xcframeworks and `include_ffmpeg.zip`: ffmpeg, openssl and zlib (linked in statically);
   `FFmpegHeaders.xcframework`: ffmpeg. `jniLibs.zip` carries none, as it unpacks into Gradle's
   native-library folder: on Android the FFmpeg licenses come with `include_ffmpeg.zip`.
 
@@ -47,7 +48,7 @@ Conan itself is not installed globally: `yarn setup:conan` creates a gitignored 
 
 ```bash
 yarn setup:conan        # .venv + .conan2 (profile detect, conan/config/global.conf)
-yarn build              # clean, build:conan, build:ffmpeg
+yarn build              # clean, then build:conan (every library, FFmpeg included)
 yarn export             # export/*.zip and export/spm/*.xcframework.zip + checksums.txt
 yarn verify --release   # fails on a wrong slice, platform, min OS, symbol or asset layout
 ```
@@ -58,22 +59,34 @@ yarn verify --release   # fails on a wrong slice, platform, min OS, symbol or as
 
 ### How the Conan build fits together
 
-- `conanfile.py` requires each library at the version from `configs.json`, all static,
-  `opusfile:http=False` (no OpenSSL in opusfile), OpenSSL `no_asm`, `no_zlib` and `no_apps`.
+- `conanfile.py` requires each library at the version from `configs.json`, all static except
+  FFmpeg, `opusfile:http=False` (no OpenSSL in opusfile), OpenSSL `no_asm`, `no_zlib` and
+  `no_apps`. FFmpeg: `disable_everything` plus the decoders, encoders, demuxers, muxers, parser
+  and protocols react-native-audio-api uses (`FFMPEG_COMPONENTS`), `with_ssl=openssl`,
+  `with_zlib`, and every other optional library the recipe enables by default turned off
+  (`FFMPEG_DISABLED`). ConanCenter keeps only recent FFmpeg versions; `configs.json` must name
+  one its `recipes/ffmpeg/config.yml` lists.
 - `conan/profiles/`: one host profile per slice. Apple profiles include `apple.base` (the
   detected `default` Mac profile, which is also the build profile); `android-<abi>` include
   `android.base` (API 24, clang 18, `c++_shared`, NDK from `ANDROID_NDK_ROOT`, 16 KB page-size
   link flags). Both bases restore the vorbis flags of the old autotools build (`-fsigned-char`,
-  plus `-ffast-math` on Apple) and make compiler/linker flags part of the package ID.
+  plus `-ffast-math` on Apple), pass FFmpeg's extra configure flags (`--enable-small`,
+  `--disable-debug`, no x86 or inline assembly) and make compiler/linker flags part of the
+  package ID. FFmpeg's configure ignores the compiler Conan's Android toolchain sets, so each
+  `android-<abi>` profile names the NDK's `<triple><api>-clang` for it.
   The list of profiles a full build covers is in `scripts/conan_profiles.sh`.
 - `conan.lock` pins every library and build tool (cmake, autotools, pkgconf, ...) to an exact
   version and recipe revision; builds pass `--lockfile conan.lock`, so a recipe update on
   ConanCenter can't change a build until the lockfile is regenerated. Sources are downloaded
   from upstream and checked against the sha256 in the recipe.
 - `scripts/conan_build.sh` runs `conan install` with the `full_deploy` deployer into
-  `build/conan/<profile>/` and copies the result into the layout below, plus
-  `build/intermediate/openssl-prebuilt/<variant>/` for `ffmpeg_setup.sh`, which stops if the
-  OpenSSL version there differs from `configs.json`.
+  `build/conan/<profile>/` and copies the result into the layout below. FFmpeg's dylibs are
+  merged per SDK in `build/intermediate/ffmpeg/` and wrapped into frameworks and xcframeworks by
+  `scripts/create_xcframework.sh`; its headers get the react-native-audio-api adjustments
+  (no `libavutil/time.h`, `AVMediaType` renamed to `AVMediaTypeFFmpeg`).
+  The NDK's CMake toolchain always compiles with `-g`, so the Android `.a` and `.so` files are
+  stripped of debug info (`llvm-strip --strip-debug`, symbols kept); `verify_outputs.sh` fails
+  if any comes back.
 
 ## Output Layout
 
@@ -84,7 +97,7 @@ Build artifacts are written to `outputs/`:
 - `outputs/licenses/<package>/`: license files from the Conan packages and FFmpeg
 - `outputs/android/<abi>/`: Ogg/Opus/Vorbis static libs (`android/licenses/` too)
 - `outputs/iphoneos/`, `outputs/iphonesimulator/`, `outputs/macosx/` (Catalyst): fat
-  Ogg/Opus/Vorbis static libs, and OpenSSL `libcrypto.a`, `libssl.a` copied by the FFmpeg script
+  Ogg/Opus/Vorbis static libs
 - `outputs/jniLibs/<abi>/`: FFmpeg Android shared libs (`.so`)
 - `outputs/ffmpeg_ios/`: FFmpeg XCFrameworks (device + simulator + catalyst slices)
 
@@ -119,14 +132,15 @@ the same URL, so **a tag is never reused**: every rebuild gets a new tag.
 ### Changing the Android NDK or API level
 
 `configs.json` `android` holds both: `ndk` (the exact NDK revision, which CI installs) and
-`api_level` (react-native-audio-api's `minSdkVersion`; `ffmpeg_setup.sh` reads it too).
+`api_level` (react-native-audio-api's `minSdkVersion`).
 
 - Follow React Native: move the NDK when react-native-audio-api adopts an RN version whose
   template pins a new `ndkVersion`, not otherwise. Our libraries are plain C, so a different
   NDK in the app still links; matching keeps compiler and 16 KB page-size behaviour identical.
 - Change `configs.json`, install that NDK, and run `yarn build:conan`. Conan profiles can't read
   JSON, so `conan/profiles/android.base` repeats `os.api_level` and `compiler.version` (the NDK's
-  clang major); `conan_build.sh` stops and names the line to change when they disagree.
+  clang major), and each `android-<abi>` profile the API level in FFmpeg's `<triple><api>-clang`;
+  `conan_build.sh` stops and names the file to change when they disagree.
 - `conan.lock` doesn't depend on the NDK, so no relock. Release with a new tag; the CI cache key
   includes the NDK version, so it rebuilds from scratch.
 
