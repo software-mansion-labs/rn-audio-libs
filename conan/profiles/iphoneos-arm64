@@ -1,0 +1,7 @@
+include(apple.base)
+
+[settings]
+os=iOS
+os.sdk=iphoneos
+os.version=15.1
+arch=armv8

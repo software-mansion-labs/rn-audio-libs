@@ -1,0 +1,7 @@
+include(apple.base)
+
+[settings]
+os=Macos
+os.subsystem=catalyst
+os.subsystem.ios_version=15.1
+arch=x86_64

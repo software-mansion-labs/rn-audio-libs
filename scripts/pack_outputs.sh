@@ -29,8 +29,9 @@ for dir in "$OUTPUTS_DIR"/*; do
 
     # The Ogg/Opus/Vorbis headers stay tracked in react-native-audio-api. The FFmpeg
     # headers are not: download-prebuilt-binaries.sh fetches include_ffmpeg.zip there
-    # whenever FFmpeg is enabled, so it has to ship as a release asset.
-    if [[ "$name" == "include" ]]; then
+    # whenever FFmpeg is enabled, so it has to ship as a release asset. The licenses travel
+    # inside android.zip and each xcframework instead of as an archive of their own.
+    if [[ "$name" == "include" || "$name" == "licenses" ]]; then
         continue
     fi
 

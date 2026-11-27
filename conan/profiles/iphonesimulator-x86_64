@@ -1,0 +1,7 @@
+include(apple.base)
+
+[settings]
+os=iOS
+os.sdk=iphonesimulator
+os.version=15.1
+arch=x86_64

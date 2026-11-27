@@ -17,3 +17,5 @@ outputs/
 sources/
 build/
 export/
+.venv/
+.conan2/

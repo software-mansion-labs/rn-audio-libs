@@ -2,6 +2,9 @@
 
 This repository builds and packages native audio dependencies used by
 [`react-native-audio-api`](https://github.com/software-mansion/react-native-audio-api).
+That repository downloads the release assets at `pod install` / Gradle time
+(`scripts/download-prebuilt-binaries.sh`, pinned `TAG`) and through SwiftPM binary targets
+(`Package.swift`, pinned checksums). Its users never run anything from here.
 
 Library versions are configured in `configs.json`.
 
@@ -13,96 +16,162 @@ Library versions are configured in `configs.json`.
 - LibOgg (BSD): [bsd3ogg.txt](bsd3ogg.txt)
 - LibVorbis (BSD): [bsd3ogg.txt](bsd3ogg.txt)
 
+Ogg, Opus, Opusfile, Vorbis and OpenSSL are built with [Conan 2](https://docs.conan.io) from
+the ConanCenter recipes. FFmpeg is built by `scripts/ffmpeg_setup.sh` and links the OpenSSL
+built by Conan. FFmpeg's configure reports its build as "LGPL version 2.1 or later".
+
+License files ship with the binaries, under `licenses/<package>/`, taken from the sources being
+built (Conan packages, and FFmpeg's `LICENSE.md` and `COPYING.LGPL*`):
+
+- `android.zip`: ogg, opus, opusfile, vorbis, openssl
+- each Ogg/Opus/Vorbis xcframework: its own package
+- FFmpeg xcframeworks and `include_ffmpeg.zip`: ffmpeg and openssl (linked in statically);
+  `FFmpegHeaders.xcframework`: ffmpeg. `jniLibs.zip` carries none, as it unpacks into Gradle's
+  native-library folder: on Android the FFmpeg licenses come with `include_ffmpeg.zip`.
+
 ## Requirements
 
-- macOS + Xcode command line tools (required for Apple builds)
-- `yarn`
-- `zip` (for export packaging)
-- `ANDROID_NDK_ROOT` (or `ANDROID_NDK`) for Android builds
+| Tool | Version | Notes |
+| --- | --- | --- |
+| macOS + Xcode | 26.6 in CI (`XCODE_APP` in `.github/workflows/release.yml`) | `sudo xcode-select -s /Applications/Xcode_26.6.app` |
+| Android NDK | `configs.json` `android.ndk` (27.1.12297006, clang 18) | `sdkmanager "ndk;27.1.12297006"`, then `export ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.1.12297006`; the build refuses any other NDK |
+| Python | >= 3.10 (`.python-version`: 3.12) | `pyenv install` picks up `.python-version` |
+| `yarn` | 4.6 (corepack) | |
+| `zip` | | for packing |
 
-## Scripts
+Conan itself is not installed globally: `yarn setup:conan` creates a gitignored `.venv/` from
+`requirements.txt` (exact versions, verified with `--require-hashes`), and every script uses
+`CONAN_HOME=.conan2` inside the repository (gitignored too), so nothing touches `~/.conan2`.
 
-All scripts are in `scripts/`.
+## Building
 
-### Main yarn commands
+```bash
+yarn setup:conan        # .venv + .conan2 (profile detect, conan/config/global.conf)
+yarn build              # clean, build:conan, build:ffmpeg
+yarn export             # export/*.zip and export/spm/*.xcframework.zip + checksums.txt
+yarn verify --release   # fails on a wrong slice, platform, min OS, symbol or asset layout
+```
 
-- `yarn build:opus`: builds Ogg/Opus/Opusfile static libs
-- `yarn build:vorbis`: builds Ogg/Vorbis static libs
-- `yarn build:ffmpeg`: builds FFmpeg (+OpenSSL dependencies) and XCFrameworks
-- `yarn build`: runs `clean` + all build scripts
-- `yarn export`: zips built outputs into `export/`
-- `yarn clean`: removes `outputs/*`, `sources/*`, `build/*`
+`yarn build:conan [profile...]` builds only the given profiles from `conan/profiles/`, and
+`yarn verify [profile...]` checks just those, e.g.
+`yarn build:conan iphoneos-arm64 android-arm64-v8a`.
 
-### Direct script entrypoints
+### How the Conan build fits together
 
-- `scripts/bundle_opus.sh`
-- `scripts/bundle_vorbis.sh`
-- `scripts/ffmpeg_setup.sh`
-- `scripts/create_xcframework.sh` (invoked by `ffmpeg_setup.sh`)
-- `scripts/pack_outputs.sh`
+- `conanfile.py` requires each library at the version from `configs.json`, all static,
+  `opusfile:http=False` (no OpenSSL in opusfile), OpenSSL `no_asm`, `no_zlib` and `no_apps`.
+- `conan/profiles/`: one host profile per slice. Apple profiles include `apple.base` (the
+  detected `default` Mac profile, which is also the build profile); `android-<abi>` include
+  `android.base` (API 24, clang 18, `c++_shared`, NDK from `ANDROID_NDK_ROOT`, 16 KB page-size
+  link flags). Both bases restore the vorbis flags of the old autotools build (`-fsigned-char`,
+  plus `-ffast-math` on Apple) and make compiler/linker flags part of the package ID.
+  The list of profiles a full build covers is in `scripts/conan_profiles.sh`.
+- `conan.lock` pins every library and build tool (cmake, autotools, pkgconf, ...) to an exact
+  version and recipe revision; builds pass `--lockfile conan.lock`, so a recipe update on
+  ConanCenter can't change a build until the lockfile is regenerated. Sources are downloaded
+  from upstream and checked against the sha256 in the recipe.
+- `scripts/conan_build.sh` runs `conan install` with the `full_deploy` deployer into
+  `build/conan/<profile>/` and copies the result into the layout below, plus
+  `build/intermediate/openssl-prebuilt/<variant>/` for `ffmpeg_setup.sh`, which stops if the
+  OpenSSL version there differs from `configs.json`.
 
 ## Output Layout
 
 Build artifacts are written to `outputs/`:
 
-- `outputs/include/`
-  - public headers for `ogg`, `opus`, `opusfile`, `vorbis`, `openssl`
-- `outputs/include_ffmpeg/`
-  - FFmpeg headers
-- `outputs/android/<abi>/`
-  - static libs from opus/vorbis scripts
-  - OpenSSL static libs copied by FFmpeg script
-- `outputs/iphoneos/`
-  - fat Apple static libs for device (`.a`)
-  - OpenSSL `libcrypto.a`, `libssl.a`
-- `outputs/iphonesimulator/`
-  - fat Apple static libs for simulator (`.a`)
-  - OpenSSL `libcrypto.a`, `libssl.a`
-- `outputs/macosx/`
-  - fat Apple static libs for Catalyst/macOSX target (`.a`)
-  - OpenSSL `libcrypto.a`, `libssl.a`
-- `outputs/jniLibs/<abi>/`
-  - FFmpeg Android shared libs (`.so`)
-- `outputs/ffmpeg_ios/`
-  - FFmpeg XCFrameworks (device + simulator + catalyst slices)
+- `outputs/include/`: public headers for `ogg`, `opus`, `opusfile`, `vorbis`, `openssl`
+- `outputs/include_ffmpeg/`: FFmpeg headers
+- `outputs/licenses/<package>/`: license files from the Conan packages and FFmpeg
+- `outputs/android/<abi>/`: Ogg/Opus/Vorbis static libs (`android/licenses/` too)
+- `outputs/iphoneos/`, `outputs/iphonesimulator/`, `outputs/macosx/` (Catalyst): fat
+  Ogg/Opus/Vorbis static libs, and OpenSSL `libcrypto.a`, `libssl.a` copied by the FFmpeg script
+- `outputs/jniLibs/<abi>/`: FFmpeg Android shared libs (`.so`)
+- `outputs/ffmpeg_ios/`: FFmpeg XCFrameworks (device + simulator + catalyst slices)
 
-## Intermediate Build Files
+Intermediate data is kept under `build/` and not purged automatically.
 
-- Intermediate data is kept under `build/intermediate/`.
-- Build scripts do not purge `build/intermediate` automatically.
+## Release assets
 
-## Export Packaging
+`react-native-audio-api` pins the tag and fails on a missing asset. A release has exactly:
 
-Run:
+- `android.zip`: `android/<abi>/<lib>.a` for the 4 ABIs and 6 Ogg/Opus/Vorbis libs
+- `libopus`, `libopusfile`, `libogg`, `libvorbis`, `libvorbisenc`, `libvorbisfile`
+  `.xcframework.zip`: device, simulator and Catalyst slices
+- `jniLibs.zip`, `include_ffmpeg.zip`, and `libavcodec`, `libavformat`, `libavutil`,
+  `libswresample`, `FFmpegHeaders` `.xcframework.zip`: FFmpeg
+- `checksums.txt`: the SwiftPM checksum of each `.xcframework.zip`
 
-```bash
-yarn export
-```
+Repacking changes every checksum, and SwiftPM rejects an asset whose checksum changed under
+the same URL, so **a tag is never reused**: every rebuild gets a new tag.
 
-This creates `export/*.zip`, one archive per top-level directory in `outputs/`,
-excluding `include` (those Ogg/Opus/Vorbis headers are tracked in
-`react-native-audio-api`).
+## Runbook
 
-For iOS, also run:
+### Bumping a library
 
-```bash
-bash scripts/pack_spm_xcframeworks.sh
-```
+1. Change the version in `configs.json` (OpenSSL: stay on the 3.5 LTS line, see below).
+2. `yarn lock:conan` (with `ANDROID_NDK_ROOT` set). It recreates `conan.lock` across all
+   profiles from the latest ConanCenter recipe revisions; to refresh revisions without a version
+   change run it as well (`yarn lock:conan --update` also re-checks the remote).
+3. Build and verify locally if the change is more than a patch bump, then open a PR with
+   `configs.json` and `conan.lock`; review the lockfile diff (new revisions are new recipe code).
+4. After merging, run the release workflow (below).
 
-This creates `export/spm/<name>.xcframework.zip`, one per library, plus
-`checksums.txt`. CocoaPods and Swift Package Manager both consume these.
+### Changing the Android NDK or API level
 
-A release needs these archives attached as assets, because
-`react-native-audio-api` pins the tag (`download-prebuilt-binaries.sh` and
-`Package.swift`) and fails on a missing one:
+`configs.json` `android` holds both: `ndk` (the exact NDK revision, which CI installs) and
+`api_level` (react-native-audio-api's `minSdkVersion`; `ffmpeg_setup.sh` reads it too).
 
-- `android.zip`: Android static libs
-- `libopus`, `libopusfile`, `libogg`, `libvorbis`, `libvorbisenc`,
-  `libvorbisfile` `.xcframework.zip`: iOS static libs
-- `jniLibs.zip`, `include_ffmpeg.zip`, and `libavcodec`, `libavformat`,
-  `libavutil`, `libswresample`, `FFmpegHeaders` `.xcframework.zip`: FFmpeg,
-  only fetched when FFmpeg is enabled
+- Follow React Native: move the NDK when react-native-audio-api adopts an RN version whose
+  template pins a new `ndkVersion`, not otherwise. Our libraries are plain C, so a different
+  NDK in the app still links; matching keeps compiler and 16 KB page-size behaviour identical.
+- Change `configs.json`, install that NDK, and run `yarn build:conan`. Conan profiles can't read
+  JSON, so `conan/profiles/android.base` repeats `os.api_level` and `compiler.version` (the NDK's
+  clang major); `conan_build.sh` stops and names the line to change when they disagree.
+- `conan.lock` doesn't depend on the NDK, so no relock. Release with a new tag; the CI cache key
+  includes the NDK version, so it rebuilds from scratch.
 
-Repacking changes every checksum, and Swift Package Manager rejects an asset
-whose checksum changed under the same URL, so publish rebuilt archives under a
-new tag. Copy the new `checksums.txt` values into `Package.swift`.
+### Releasing
+
+1. Run **Release** (`.github/workflows/release.yml`) with a new tag (`workflow_dispatch`), or
+   push a new `v*` tag. It builds everything, runs `yarn verify --release`, attests build
+   provenance for every asset and uploads them, with `checksums.txt`, to a **draft** release.
+   It refuses a tag that already has a release.
+2. Point react-native-audio-api at the draft:
+
+   ```bash
+   gh release download <tag> -R software-mansion-labs/rn-audio-libs -p checksums.txt
+   scripts/bump_rn_audio_api.py <tag> checksums.txt ~/projects/react-native-audio-api
+   ```
+
+   It rewrites `TAG` in `packages/react-native-audio-api/scripts/download-prebuilt-binaries.sh`,
+   `prebuiltBinariesTag` and the binary-target checksums in `Package.swift`. Open the PR there.
+3. Draft assets can't be downloaded anonymously, so the downstream CI can't fetch them yet:
+   publish the draft as a **pre-release** (`gh release edit <tag> --draft=false --prerelease`)
+   and rerun the downstream PR's CI. The assets are now final; never change them.
+4. Once the downstream PR is green, mark the release latest
+   (`gh release edit <tag> --prerelease=false --latest`) and merge the PR. If it fails, fix
+   forward with a new tag; the pre-release stays as a record.
+
+To check an asset's provenance: `gh attestation verify <asset> -R software-mansion-labs/rn-audio-libs`.
+
+### Rolling back
+
+Revert the `TAG`/checksum bump commit in react-native-audio-api: the previous release stays
+published and unchanged. Never delete or re-upload assets of a published tag; fix forward
+with a new tag.
+
+### OpenSSL security advisories
+
+OpenSSL is linked statically into FFmpeg (the HTTPS/TLS protocols), so a fix reaches users only
+through a new release here and a react-native-audio-api bump. We follow the 3.5 LTS line
+(supported until April 2030).
+
+1. Watch [openssl-library.org/news/vulnerabilities](https://openssl-library.org/news/vulnerabilities/)
+   or the `openssl-announce` list. Advisories rated Low usually ship with the next release;
+   Moderate and above: start once a fixed 3.5.x is out.
+2. Wait for the 3.5.x recipe version on ConanCenter (usually within days; check
+   `recipes/openssl/config.yml` in conan-center-index). If it lags, a local recipe export
+   (`conan export <recipe> --version 3.5.x`) followed by `yarn lock:conan` works as a stopgap.
+3. Bump `configs.json` `openssl.version`, `yarn lock:conan`, PR, release, downstream bump as
+   above. Mention the CVE in the release notes.
+4. Before 3.5 reaches end of life, move to the next LTS line the same way.

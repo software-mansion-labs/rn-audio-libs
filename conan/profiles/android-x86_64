@@ -1,0 +1,4 @@
+include(android.base)
+
+[settings]
+arch=x86_64

@@ -1,0 +1,22 @@
+# Shared by the android-<abi> profiles. configs.json pins the NDK and API level; conan_build.sh
+# fails unless compiler.version is that NDK's clang and os.api_level matches. API 24 is
+# react-native-audio-api's minSdkVersion, and the first with fseeko/ftello on 32-bit ABIs.
+[settings]
+os=Android
+os.api_level=24
+compiler=clang
+compiler.version=18
+compiler.libcxx=c++_shared
+compiler.cppstd=17
+build_type=Release
+
+[conf]
+tools.android:ndk_path={{ os.getenv("ANDROID_NDK_ROOT") or os.getenv("ANDROID_NDK") }}
+# 16 KB page-size alignment, required for apps targeting Android 15+ devices with 16 KB pages.
+tools.build:sharedlinkflags=["-Wl,-z,max-page-size=16384", "-Wl,-z,common-page-size=16384"]
+tools.build:exelinkflags=["-Wl,-z,max-page-size=16384", "-Wl,-z,common-page-size=16384"]
+# The old autotools build compiled vorbis with -fsigned-char (char is unsigned on Android ARM);
+# its CMake build doesn't.
+vorbis/*:tools.build:cflags=["-fsigned-char"]
+# Flags are part of the package ID, so changing them can't reuse a cached binary.
+tools.info.package_id:confs=["tools.build:cflags", "tools.build:sharedlinkflags", "tools.build:exelinkflags"]
