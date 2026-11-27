@@ -304,14 +304,18 @@ sync_openssl_dependency_outputs() {
         "${OPENSSL_PREBUILT_FOLDER}/catalyst-x86_64/libssl.a" \
         -output "${ROOT_DIR}/outputs/macosx/libssl.a"
 
-    local abi
-    for abi in arm64-v8a armeabi-v7a x86 x86_64; do
-        if [ -f "${OPENSSL_PREBUILT_FOLDER}/${abi}/libcrypto.a" ] && [ -f "${OPENSSL_PREBUILT_FOLDER}/${abi}/libssl.a" ]; then
-            mkdir -p "${ROOT_DIR}/outputs/android/${abi}"
-            cp "${OPENSSL_PREBUILT_FOLDER}/${abi}/libcrypto.a" "${ROOT_DIR}/outputs/android/${abi}/libcrypto.a"
-            cp "${OPENSSL_PREBUILT_FOLDER}/${abi}/libssl.a" "${ROOT_DIR}/outputs/android/${abi}/libssl.a"
-        fi
-    done
+    # No OpenSSL in outputs/android: FFmpeg links it from openssl-prebuilt, and android.zip
+    # (react-native-audio-api links only the Ogg/Opus/Vorbis libs from it) never shipped it.
+}
+
+# FFmpeg's own license files, from the source being built, plus OpenSSL's (linked in statically).
+# include_ffmpeg.zip carries them on Android, where jniLibs/ can't hold anything but libraries.
+sync_ffmpeg_licenses() {
+    local licenses_dir="${ROOT_DIR}/outputs/licenses"
+    rm -rf "${licenses_dir}/ffmpeg" "${FFMPEG_INCLUDE_OUTPUT_DIR}/licenses"
+    mkdir -p "${licenses_dir}/ffmpeg" "${FFMPEG_INCLUDE_OUTPUT_DIR}/licenses"
+    cp "${SOURCE_DIR}/LICENSE.md" "${SOURCE_DIR}/COPYING.LGPLv2.1" "${SOURCE_DIR}/COPYING.LGPLv3" "${licenses_dir}/ffmpeg/"
+    cp -R "${licenses_dir}/ffmpeg" "${licenses_dir}/openssl" "${FFMPEG_INCLUDE_OUTPUT_DIR}/licenses/"
 }
 
 # Download FFmpeg source if not present
@@ -327,7 +331,7 @@ cd - > /dev/null
 # Use NDK_ROOT if ANDROID_NDK_ROOT is not set
 NDK_PATH="${ANDROID_NDK_ROOT:-$NDK_ROOT}"
 
-API_LEVEL=21
+API_LEVEL=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE'))['android']['api_level'])")
 
 if [ -d "$NDK_PATH" ]; then
     TOOLCHAIN_PATH="${NDK_PATH}/toolchains/llvm/prebuilt"
@@ -347,78 +351,19 @@ if [ -d "$NDK_PATH" ]; then
 fi
 
 OPENSSL_PREBUILT_FOLDER="${ROOT_DIR}/build/intermediate/openssl-prebuilt"
-if [ ! -d "$OPENSSL_PREBUILT_FOLDER" ]; then
-    echo "Cloning and building OpenSSL..."
-    OPENSSL_SOURCE_DIR="$BUILD_DIR/openssl-src"
-    if [ ! -d "$OPENSSL_SOURCE_DIR" ]; then
-        git clone https://github.com/openssl/openssl.git "$OPENSSL_SOURCE_DIR"
-    fi
-
-    build_openssl_variant() {
-        local variant_name="$1"
-        local openssl_target="$2"
-        local output_subdir="$3"
-        local variant_cflags="$4"
-        local extra_config="${5:-}"
-
-        local variant_dir="${BUILD_DIR}/openssl-${variant_name}-run-$(date +%s)-$$-$RANDOM"
-        cp -R "$OPENSSL_SOURCE_DIR" "$variant_dir"
-        cd "$variant_dir"
-
-        if [ -n "$variant_cflags" ]; then
-            export CFLAGS="$variant_cflags"
-        else
-            unset CFLAGS
-        fi
-
-        if [ -n "$extra_config" ]; then
-            ./Configure "$openssl_target" no-shared no-asm no-tests "$extra_config"
-        else
-            ./Configure "$openssl_target" no-shared no-asm no-tests
-        fi
-
-        make build_libs -j10
-        mkdir -p "${OPENSSL_PREBUILT_FOLDER}/${output_subdir}"
-        cp libcrypto.a libssl.a "${OPENSSL_PREBUILT_FOLDER}/${output_subdir}"
-        local include_dir="${OPENSSL_PREBUILT_FOLDER}/include-${output_subdir}"
-        mkdir -p "${include_dir}"
-        cp -r include/crypto include/openssl "${include_dir}"
-        cd "$ROOT_DIR"
-    }
-
-    # ios-arm
-    build_openssl_variant "iphoneos" "ios64-xcrun" "iphoneos" "-mios-version-min=${IOS_MIN_VERSION}"
-
-    # arm-simulator
-    build_openssl_variant "iphonesimulator-arm64" "iossimulator-arm64-xcrun" "iphonesimulator" "-mios-simulator-version-min=${IOS_MIN_VERSION}"
-
-    # x86_64-simulator
-    build_openssl_variant "iphonesimulator-x86_64" "iossimulator-x86_64-xcrun" "iphonesimulator-x86_64" "-mios-simulator-version-min=${IOS_MIN_VERSION}"
-
-    # macOS arm64
-    build_openssl_variant "macos-arm64" "darwin64-arm64-cc" "macos-arm64" "-mmacosx-version-min=${MACOS_MIN_VERSION}"
-
-    # macOS x86_64
-    build_openssl_variant "macos-x86_64" "darwin64-x86_64-cc" "macos-x86_64" "-mmacosx-version-min=${MACOS_MIN_VERSION}"
-
-    # Mac Catalyst arm64
-    build_openssl_variant "catalyst-arm64" "darwin64-arm64-cc" "catalyst-arm64" "-target arm64-apple-ios${IOS_MIN_VERSION}-macabi"
-
-    # Mac Catalyst x86_64
-    build_openssl_variant "catalyst-x86_64" "darwin64-x86_64-cc" "catalyst-x86_64" "-target x86_64-apple-ios${IOS_MIN_VERSION}-macabi"
-
-    # arm64-v8a
-    if [ -d "$NDK_PATH" ]; then
-        build_openssl_variant "android-arm64-v8a" "android-arm64" "arm64-v8a" "" "-D__ANDROID_API__=${API_LEVEL}"
-
-        # armeabi-v7a
-        build_openssl_variant "android-armeabi-v7a" "android-arm" "armeabi-v7a" "" "-D__ANDROID_API__=${API_LEVEL}"
-
-        build_openssl_variant "android-x86" "android-x86" "x86" "" "-D__ANDROID_API__=${API_LEVEL}"
-
-        build_openssl_variant "android-x86_64" "android-x86_64" "x86_64" "" "-D__ANDROID_API__=${API_LEVEL}"
-    fi
+# scripts/conan_build.sh builds OpenSSL (the version in configs.json) into this folder.
+OPENSSL_VERSION=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE'))['openssl']['version'])")
+OPENSSL_VARIANTS="iphoneos iphonesimulator iphonesimulator-x86_64 macos-arm64 macos-x86_64 catalyst-arm64 catalyst-x86_64"
+if [ -d "$NDK_PATH" ]; then
+    OPENSSL_VARIANTS="$OPENSSL_VARIANTS arm64-v8a armeabi-v7a x86 x86_64"
 fi
+for variant in $OPENSSL_VARIANTS; do
+    if ! grep -q "OPENSSL_VERSION_TEXT \"OpenSSL ${OPENSSL_VERSION} " "${OPENSSL_PREBUILT_FOLDER}/include-${variant}/openssl/opensslv.h" 2>/dev/null \
+        || [ ! -f "${OPENSSL_PREBUILT_FOLDER}/${variant}/libssl.a" ] || [ ! -f "${OPENSSL_PREBUILT_FOLDER}/${variant}/libcrypto.a" ]; then
+        echo "Error: OpenSSL ${OPENSSL_VERSION} for ${variant} not found in ${OPENSSL_PREBUILT_FOLDER}; run yarn build:conan first." >&2
+        exit 1
+    fi
+done
 
 # Apple Platforms (macOS, iOS, Catalyst)
 if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -694,5 +639,6 @@ else
 fi
 
 postprocess_ffmpeg_headers
+sync_ffmpeg_licenses
 
 echo "All FFmpeg builds completed!"

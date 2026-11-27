@@ -24,6 +24,19 @@ FFMPEG_FRAMEWORKS=(libavcodec libavformat libavutil libswresample)
 FFMPEG_HEADERS_NAME="FFmpegHeaders"
 MIN_IOS="15.0"
 
+# The packages whose licenses (outputs/licenses/<package>/) ship in each xcframework.
+license_packages() {
+    case "$1" in
+        libopusfile) echo opusfile ;;
+        libopus) echo opus ;;
+        libogg) echo ogg ;;
+        libvorbis*) echo vorbis ;;
+        # The FFmpeg frameworks link OpenSSL statically.
+        libav* | libswresample) echo ffmpeg openssl ;;
+        "$FFMPEG_HEADERS_NAME") echo ffmpeg ;;
+    esac
+}
+
 for tool in xcodebuild xcrun zip shasum; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "Error: $tool is required" >&2
@@ -36,6 +49,21 @@ EXPORT_DIR="$(cd "$EXPORT_DIR" && pwd)"
 rm -f "$EXPORT_DIR"/*.xcframework.zip "$EXPORT_DIR/checksums.txt"
 STAGING_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGING_DIR"' EXIT
+
+# Copies the license files of <library>'s packages into <xcframework>/licenses/<package>/.
+add_licenses() {
+    local xcframework="$1"
+    local package
+    for package in $(license_packages "$2"); do
+        local licenses="$SOURCE_DIR/licenses/$package"
+        if [ ! -d "$licenses" ]; then
+            echo "Error: missing $licenses" >&2
+            exit 1
+        fi
+        mkdir -p "$xcframework/licenses"
+        cp -R "$licenses" "$xcframework/licenses/$package"
+    done
+}
 
 # Zips <xcframework> with its directory as the archive root, as SwiftPM expects, and records
 # the checksum SwiftPM verifies (`swift package compute-checksum` is the same SHA-256).
@@ -100,6 +128,7 @@ for lib in "${STATIC_LIBS[@]}"; do
     done
     xcodebuild -create-xcframework "${library_args[@]}" \
         -output "$STAGING_DIR/${lib}.xcframework" >/dev/null
+    add_licenses "$STAGING_DIR/${lib}.xcframework" "$lib"
     pack_xcframework "$STAGING_DIR/${lib}.xcframework"
 done
 
@@ -111,6 +140,7 @@ for framework in "${FFMPEG_FRAMEWORKS[@]}"; do
     fi
     cp -R "$source" "$STAGING_DIR/${framework}.xcframework"
     restore_versioned_framework_symlinks "$STAGING_DIR/${framework}.xcframework"
+    add_licenses "$STAGING_DIR/${framework}.xcframework" "$framework"
     pack_xcframework "$STAGING_DIR/${framework}.xcframework"
 done
 
@@ -134,4 +164,5 @@ xcodebuild -create-xcframework \
     -library "$STAGING_DIR/stubs/iphonesimulator/$STUB_NAME" -headers "$FFMPEG_HEADERS_DIR" \
     -library "$STAGING_DIR/stubs/maccatalyst/$STUB_NAME" -headers "$FFMPEG_HEADERS_DIR" \
     -output "$STAGING_DIR/${FFMPEG_HEADERS_NAME}.xcframework" >/dev/null
+add_licenses "$STAGING_DIR/${FFMPEG_HEADERS_NAME}.xcframework" "$FFMPEG_HEADERS_NAME"
 pack_xcframework "$STAGING_DIR/${FFMPEG_HEADERS_NAME}.xcframework"

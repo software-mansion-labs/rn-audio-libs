@@ -5,11 +5,13 @@
   "private": true,
   "scripts": {
     "scripts:exec": "chmod +x scripts/*.sh",
-    "build": "yarn run clean && yarn run build:opus && yarn run build:vorbis && yarn run build:ffmpeg",
-    "build:opus": "./scripts/bundle_opus.sh",
-    "build:vorbis": "./scripts/bundle_vorbis.sh",
+    "setup:conan": "./scripts/setup_conan.sh",
+    "lock:conan": "./scripts/conan_lock.sh",
+    "build": "yarn run clean && yarn run build:conan && yarn run build:ffmpeg",
+    "build:conan": "./scripts/conan_build.sh",
     "build:ffmpeg": "./scripts/ffmpeg_setup.sh",
-    "export": "bash ./scripts/pack_outputs.sh",
+    "export": "bash ./scripts/pack_outputs.sh && bash ./scripts/pack_spm_xcframeworks.sh",
+    "verify": "./scripts/verify_outputs.sh",
     "clean": "rm -rf outputs/* sources/* build/* 2>/dev/null || true"
   }
 }

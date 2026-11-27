@@ -1,0 +1,8 @@
+# Shared by the Apple profiles: the detected Mac (also the build profile) plus these settings.
+include(default)
+
+[conf]
+# The old autotools build compiled vorbis with these on Darwin; its CMake build adds none.
+vorbis/*:tools.build:cflags=["-ffast-math", "-fsigned-char"]
+# Flags are part of the package ID, so changing them can't reuse a cached binary.
+tools.info.package_id:confs=["tools.build:cflags", "tools.build:sharedlinkflags", "tools.build:exelinkflags"]
