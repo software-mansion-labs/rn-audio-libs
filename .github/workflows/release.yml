@@ -8,8 +8,7 @@ on:
       tag:
         description: "Release tag. Empty: v<package.json version>. Also accepts a pre-release of it (v5.0.0-rc.1). Tags are never reused."
         required: false
-  push:
-    tags: ["v*"]
+# No tag trigger: publishing the draft creates the tag, which would start a run that can only fail.
 
 permissions:
   contents: write # create the draft release
@@ -38,11 +37,7 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }}
         run: |
           VERSION="$(python3 -c "import json; print(json.load(open('package.json'))['version'])")"
-          if [ "${{ github.event_name }}" = push ]; then
-            TAG="$GITHUB_REF_NAME"
-          else
-            TAG="${INPUT_TAG:-v$VERSION}"
-          fi
+          TAG="${INPUT_TAG:-v$VERSION}"
           # package.json is the version being released: the tag is that version, or a
           # pre-release of it (v5.0.0-rc.1). Bump package.json in a PR before releasing.
           if [[ "$TAG" != "v$VERSION" && "$TAG" != "v$VERSION"-* ]]; then
@@ -55,7 +50,7 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "::error::A release named $TAG already exists; pick a new tag"; exit 1
           fi
-          if [ "${{ github.event_name }}" = workflow_dispatch ] && git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
             echo "::error::Tag $TAG already exists; pick a new tag"; exit 1
           fi
           echo "TAG=$TAG" >>"$GITHUB_ENV"

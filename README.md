@@ -150,7 +150,8 @@ the same URL, so **a tag is never reused**: every rebuild gets a new tag.
    version is the release: the workflow only accepts the tag `v<version>` or a pre-release of
    it (`v5.0.0-rc.1`).
 2. Run **Release** (`.github/workflows/release.yml`) from `main` (`workflow_dispatch`; leave the
-   tag empty for `v<version>`, or enter an rc tag), or push a matching `v*` tag. It builds
+   tag empty for `v<version>`, or enter an rc tag). Pushing a tag does not start it: the tag is
+   created when the draft is published. It builds
    everything, runs `yarn verify --release`, attests build provenance for every asset and
    uploads them, with `checksums.txt`, to a **draft** release. It refuses a tag that doesn't
    match `package.json` or already has a release.
